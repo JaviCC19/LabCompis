@@ -4,6 +4,7 @@ from CompiscriptLexer import CompiscriptLexer
 from CompiscriptParser import CompiscriptParser
 from analyzer import SemanticAnalyzer
 from tac_generator import TACGenerator
+from ir import tac
 
 
 def generate(source: str):
@@ -589,7 +590,7 @@ def test_nested_functions_in_different_methods_get_unique_labels():
     assert "begin_func A.f.aux, 16" in result
     assert "begin_func A.g.aux, 8" in result
     # aux no es un metodo: se llama directo (no por la vtable) y recibe el 'this' del metodo
-    assert function_body(source, "A.f") == ["param this", "t1 = call A.f.aux, 1", "return t1"]
+    assert function_body(source, "A.f") == ["param this", "link fp", "t1 = call A.f.aux, 1", "return t1"]
     assert function_body(source, "A.f.aux") == ["t1 = this.v", "return t1"]
 
 
@@ -600,3 +601,86 @@ def test_method_with_same_name_as_nested_function_is_still_virtual():
     """
 
     assert function_body(source, "A.h")[:2] == ["t1 = this.vtable", "t1 = t1[0]"]
+
+
+# --- funciones anidadas: enlace de acceso explicito ---------------------------
+
+CLOSURE = """
+    function externa(a: integer): integer {
+      let x: integer = a * 2;
+      function interna(b: integer): integer {
+        x = x + b;
+        return x + a;
+      }
+      return interna(1);
+    }
+"""
+
+
+def test_outer_variable_is_read_and_written_through_the_access_link():
+    assert function_body(CLOSURE, "externa.interna") == [
+        "t1 = access_link 1",
+        "t1 = t1->x",
+        "t1 = t1 + b",
+        "t2 = access_link 1",
+        "t2->x = t1",
+        "t1 = access_link 1",
+        "t1 = t1->x",
+        "t2 = access_link 1",
+        "t2 = t2->a",
+        "t1 = t1 + t2",
+        "return t1",
+    ]
+
+
+def test_call_to_nested_function_passes_current_fp_as_access_link():
+    assert function_body(CLOSURE, "externa") == [
+        "t1 = a * 2",
+        "x = t1",
+        "param 1",
+        "link fp",
+        "t1 = call externa.interna, 1",
+        "return t1",
+    ]
+
+
+def test_outer_variable_quads_carry_the_offset_in_the_outer_frame():
+    program, analyzer = generate(CLOSURE)
+    loads = [q for q in program if q.op == tac.LOAD_OUTER]
+    x = analyzer.functions[0].frame.locals[0]
+
+    assert {(q.arg2, q.offset) for q in loads} == {("x", x.offset), ("a", 0)}
+
+
+def test_access_link_climbs_several_levels_and_recursion_reuses_enclosing_link():
+    source = """
+        function a(): integer {
+          let x: integer = 1;
+          function h(): integer { return x; }
+          function b(n: integer): integer {
+            function c(): integer { return x + n; }
+            if (n <= 0) { return c(); }
+            return b(n - 1) + h();
+          }
+          return b(2);
+        }
+    """
+
+    assert function_body(source, "a.b.c")[:4] == [
+        "t1 = access_link 2", "t1 = t1->x", "t2 = access_link 1", "t2 = t2->n",
+    ]
+    body = function_body(source, "a.b")
+    assert body[2:4] == ["link fp", "t1 = call a.b.c, 0"]
+    # b se llama a si misma y a su hermana h: ambas estan declaradas en 'a', un nivel arriba
+    assert body[8:11] == ["t1 = access_link 1", "link t1", "t1 = call a.b, 1"]
+    assert body[11:14] == ["t2 = access_link 1", "link t2", "t2 = call a.h, 0"]
+
+
+def test_top_level_functions_and_globals_do_not_use_access_link():
+    result = lines("""
+        let g: integer = 1;
+        function f(): integer { return g; }
+        function k(): integer { return f(); }
+    """)
+
+    assert not any("access_link" in l or l.startswith("link") for l in result)

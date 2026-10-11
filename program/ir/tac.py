@@ -38,6 +38,10 @@ PRINT = "print"        # print arg1
 TRY_BEGIN = "try_begin"  # try_begin result(etiqueta del catch)
 TRY_END = "try_end"      # try_end
 CATCH = "catch"          # result = catch
+ACCESS_LINK = "access_link"  # result = access_link arg1(saltos): fp del registro arg1 niveles arriba
+LOAD_OUTER = "load_outer"    # result = arg1->arg2   (variable arg2 del registro al que apunta arg1)
+STORE_OUTER = "store_outer"  # result->arg1 = arg2
+LINK = "link"                # link arg1: enlace de acceso para la proxima llamada
 
 
 @dataclass
@@ -47,6 +51,7 @@ class Quad:
     arg2: str = None
     result: str = None
     operator: str = None  # operador concreto para BINARY / UNARY
+    offset: int = None  # offset en bytes del campo (LOAD/STORE_FIELD) o de la variable (LOAD/STORE_OUTER)
 
     def __str__(self):
         op = self.op
@@ -95,6 +100,14 @@ class Quad:
             return "try_end"
         if op == CATCH:
             return f"{self.result} = catch"
+        if op == ACCESS_LINK:
+            return f"{self.result} = access_link {self.arg1}"
+        if op == LOAD_OUTER:
+            return f"{self.result} = {self.arg1}->{self.arg2}"
+        if op == STORE_OUTER:
+            return f"{self.result}->{self.arg1} = {self.arg2}"
+        if op == LINK:
+            return f"link {self.arg1}"
         raise ValueError(f"operacion TAC desconocida: {op}")
 
     def as_row(self):

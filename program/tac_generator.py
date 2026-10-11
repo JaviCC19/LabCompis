@@ -100,7 +100,10 @@ class TACGenerator(ParseTreeVisitor):
         """Nombre del simbolo en el TAC; se desambiguan variables que se ocultan entre si."""
         key = id(symbol)
         if key not in self._names:
-            area = "global" if symbol.storage == "global" else self._current.label
+            if symbol.storage == "global":
+                area = "global"
+            else:
+                area = getattr(symbol, "area", None) or self._current.label
             used = self._used_names.setdefault(area, set())
             global_used = self._used_names.setdefault("global", set())
             name = symbol.name
@@ -122,10 +125,57 @@ class TACGenerator(ParseTreeVisitor):
         if target != value:
             self._emit(Quad(tac.ASSIGN, value, result=target))
 
+    # --- variables de funciones externas (enlace de acceso) -------------------
+
+    def _is_outer(self, symbol) -> bool:
+        """True si `symbol` es un parametro/local de una funcion que contiene a la actual."""
+        return (
+            symbol.storage in ("param", "local")
+            and symbol.level is not None
+            and symbol.level < self._current.frame.level
+        )
+
+    def _access_link(self, hops: int) -> str:
+        """Temporal con el fp del registro que esta `hops` niveles arriba en la cadena de acceso."""
+        base = self._new_temp()
+        self._emit(Quad(tac.ACCESS_LINK, str(hops), result=base))
+        return base
+
+    def _load_outer(self, symbol) -> str:
+        base = self._access_link(self._current.frame.level - symbol.level)
+        self._release(base)
+        result = self._new_temp()
+        self._emit(Quad(tac.LOAD_OUTER, base, self._name(symbol), result, offset=symbol.offset))
+        return result
+
+    def _store_outer(self, symbol, value: str):
+        base = self._access_link(self._current.frame.level - symbol.level)
+        self._emit(Quad(tac.STORE_OUTER, self._name(symbol), value, base, offset=symbol.offset))
+        self._release(base)
+
+    def _pass_access_link(self, callee: FunctionSymbol):
+        """Antes de llamar a una funcion anidada se fija su enlace de acceso.
+
+        El enlace apunta al registro de la funcion que declara a `callee`
+        (nivel `callee.level`): es `fp` si la declara la funcion actual, o se
+        sube por la cadena de enlaces de acceso si la declara una externa.
+        """
+        if callee is None or not callee.level:
+            return  # funciones de nivel 1 y metodos: solo ven globales (gp), no usan el enlace
+        hops = self._current.frame.level - callee.level
+        if hops == 0:
+            self._emit(Quad(tac.LINK, "fp"))
+            return
+        base = self._access_link(hops)
+        self._emit(Quad(tac.LINK, base))
+        self._release(base)
+
     def _store_variable(self, symbol, value: str):
         """Guarda `value` en la variable `symbol` (un campo se guarda a traves de `this`)."""
         if symbol.storage == "field":
-            self._emit(Quad(tac.STORE_FIELD, symbol.name, value, "this"))
+            self._emit(Quad(tac.STORE_FIELD, symbol.name, value, "this", offset=symbol.offset))
+        elif self._is_outer(symbol):
+            self._store_outer(symbol, value)
         else:
             self._value_into(self._name(symbol), value)
 
@@ -154,23 +204,23 @@ class TACGenerator(ParseTreeVisitor):
         if symbol is None or symbol.storage == "field" or ctx.initializer() is None:
             return
         value = self.visit(ctx.initializer().expression())
-        self._release(value)
         self._store_variable(symbol, value)
+        self._release(value)
 
     def visitConstantDeclaration(self, ctx: CompiscriptParser.ConstantDeclarationContext):
         symbol = self.analyzer.symbol_of.get(ctx)
         if symbol is None or symbol.storage == "field":
             return
         value = self.visit(ctx.expression())
-        self._release(value)
         self._store_variable(symbol, value)
+        self._release(value)
 
     def visitAssignment(self, ctx: CompiscriptParser.AssignmentContext):
         expressions = ctx.expression()
         if len(expressions) == 1:
             value = self.visit(expressions[0])
-            self._release(value)
             self._store_variable(self.analyzer.symbol_of[ctx], value)
+            self._release(value)
             return
 
         target = self.visit(expressions[0])
@@ -472,7 +522,8 @@ class TACGenerator(ParseTreeVisitor):
         self.visit(ctx.block(1))
         self._place_label(end_label)
 
-    def _call(self, label: str, args: list, this: str = None, returns_value: bool = True) -> str:
+    def _call(self, label: str, args: list, this: str = None, returns_value: bool = True,
+              callee: FunctionSymbol = None) -> str:
         """Evalua los argumentos, emite los `param` y la llamada; devuelve el operando del resultado."""
         values = [self.visit(a) for a in args]
         if this is not None:
@@ -480,6 +531,7 @@ class TACGenerator(ParseTreeVisitor):
         for value in values:
             self._emit(Quad(tac.PARAM, value))
         self._release(*values)
+        self._pass_access_link(callee)
         result = self._new_temp() if returns_value else None
         self._emit(Quad(tac.CALL, label, str(len(values)), result))
         return result
@@ -588,10 +640,12 @@ class TACGenerator(ParseTreeVisitor):
         symbol = self.analyzer.symbol_of.get(ctx)
         if symbol is not None and symbol.storage == "field":
             result = self._new_temp()
-            self._emit(Quad(tac.LOAD_FIELD, "this", symbol.name, result))
+            self._emit(Quad(tac.LOAD_FIELD, "this", symbol.name, result, offset=symbol.offset))
             return result
         if symbol is None or isinstance(symbol, FunctionSymbol):
             return ctx.getText()
+        if self._is_outer(symbol):
+            return self._load_outer(symbol)
         return self._name(symbol)
 
     def visitThisExpr(self, ctx: CompiscriptParser.ThisExprContext):
@@ -638,8 +692,8 @@ class TACGenerator(ParseTreeVisitor):
             if symbol.owner_class is not None:
                 # Funcion anidada dentro de un metodo: no esta en la vtable, se llama
                 # directo y recibe el mismo 'this' que el metodo que la contiene.
-                return self._call(symbol.label, args, "this", self._returns_value(symbol.type))
-            return self._call(symbol.label, args, None, self._returns_value(symbol.type))
+                return self._call(symbol.label, args, "this", self._returns_value(symbol.type), symbol)
+            return self._call(symbol.label, args, None, self._returns_value(symbol.type), symbol)
         return self._call(atom.getText(), args)
 
     def _call_method(self, receiver: str, access, call) -> str:
@@ -683,7 +737,7 @@ class TACGenerator(ParseTreeVisitor):
             value = self.visit(ctx.assignmentExpr())
             atom = lhs.primaryAtom()
             symbol = self.analyzer.symbol_of.get(atom)
-            if symbol.storage == "field":
+            if symbol.storage == "field" or self._is_outer(symbol):
                 self._store_variable(symbol, value)
                 return value
             self._release(value)
