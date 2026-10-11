@@ -379,3 +379,182 @@ def test_continue_inside_switch_targets_enclosing_loop():
     """)
 
     assert "goto L1" in body[body.index("L3:"):]
+
+
+# --- clases y objetos ---------------------------------------------------------
+
+ANIMALES = """
+    class Animal {
+        let nombre: string;
+        function constructor(nombre: string) { this.nombre = nombre; }
+        function hablar(): string { return this.nombre + " hace ruido."; }
+    }
+    class Perro : Animal {
+        function hablar(): string { return this.nombre + " ladra."; }
+    }
+"""
+
+
+def test_method_receives_this_and_accesses_fields_through_it():
+    assert function_body(ANIMALES, "Animal.constructor") == ["this.nombre = nombre", "return"]
+    assert function_body(ANIMALES, "Perro.hablar") == [
+        "t1 = this.nombre",
+        't1 = t1 + " ladra."',
+        "return t1",
+    ]
+
+
+def test_new_allocates_object_and_calls_inherited_constructor():
+    body = main_body(ANIMALES + 'let p: Perro = new Perro("Toby");')
+
+    # vtable (8) + nombre (8)
+    assert body == ["t1 = new Perro, 16", "param t1", 'param "Toby"', "call Animal.constructor, 2", "p = t1"]
+
+
+def test_call_on_class_without_overrides_is_direct():
+    body = main_body(ANIMALES + """
+        let p: Perro = new Perro("Toby");
+        print(p.hablar());
+    """)
+
+    assert body[-3:] == ["param p", "t1 = call Perro.hablar, 1", "print t1"]
+
+
+def test_call_on_overridden_method_goes_through_vtable():
+    body = main_body(ANIMALES + """
+        let a: Animal = new Perro("Toby");
+        print(a.hablar());
+    """)
+
+    assert body[-5:] == [
+        "t1 = a.vtable",
+        "t1 = t1[0]",
+        "param a",
+        "t1 = call t1, 1",
+        "print t1",
+    ]
+
+
+def test_field_initializers_run_in_init_called_by_new():
+    source = """
+        class Contador {
+            let valor: integer = 10;
+            function constructor() {}
+        }
+        let c: Contador = new Contador();
+    """
+
+    assert function_body(source, "Contador.__init") == ["this.valor = 10", "return"]
+    assert main_body(source) == [
+        "t1 = new Contador, 12",
+        "param t1",
+        "call Contador.__init, 1",
+        "param t1",
+        "call Contador.constructor, 1",
+        "c = t1",
+    ]
+
+
+def test_subclass_init_calls_superclass_init_first():
+    source = """
+        class A { let x: integer = 1; }
+        class B : A { let y: integer = 2; }
+    """
+
+    assert function_body(source, "B.__init") == ["param this", "call A.__init, 1", "this.y = 2", "return"]
+
+
+def test_property_assignment_and_access_on_object():
+    body = main_body(ANIMALES + """
+        let p: Perro = new Perro("Toby");
+        p.nombre = "Rex";
+        print(p.nombre);
+    """)
+
+    assert body[-3:] == ['p.nombre = "Rex"', "t1 = p.nombre", "print t1"]
+
+
+def test_method_called_without_this_inside_class():
+    source = """
+        class A {
+            function uno(): integer { return 1; }
+            function dos(): integer { return uno() + 1; }
+        }
+    """
+
+    assert function_body(source, "A.dos") == [
+        "param this",
+        "t1 = call A.uno, 1",
+        "t1 = t1 + 1",
+        "return t1",
+    ]
+
+
+# --- arreglos, foreach y try/catch -------------------------------------------
+
+def test_array_literal_allocates_and_stores_each_element():
+    assert main_body("let a: integer[] = [1, 2];") == [
+        "t1 = new_array 2",
+        "t1[0] = 1",
+        "t1[1] = 2",
+        "a = t1",
+    ]
+
+
+def test_index_read_and_write():
+    body = main_body("""
+        let a: integer[] = [1, 2];
+        let i: integer = 0;
+        a[i + 1] = a[i] * 2;
+    """)
+
+    assert body[-4:] == ["t1 = i + 1", "t2 = a[i]", "t2 = t2 * 2", "a[t1] = t2"]
+
+
+def test_nested_array_access():
+    body = main_body("""
+        let m: integer[][] = [[1, 2], [3, 4]];
+        print(m[1][0]);
+    """)
+
+    assert body[-3:] == ["t1 = m[1]", "t1 = t1[0]", "print t1"]
+
+
+def test_foreach_iterates_by_index_up_to_length():
+    body = main_body("""
+        let a: integer[] = [1];
+        foreach (x in a) { print(x); }
+    """)
+
+    assert body[3:] == [
+        "t1 = 0",
+        "t2 = len a",
+        "L1:",
+        "t3 = t1 < t2",
+        "ifFalse t3 goto L3",
+        "x = a[t1]",
+        "print x",
+        "L2:",
+        "t1 = t1 + 1",
+        "goto L1",
+        "L3:",
+    ]
+
+
+def test_try_catch_registers_handler_and_binds_error():
+    body = main_body("""
+        let a: integer[] = [1];
+        try { print(a[5]); } catch (err) { print(err); }
+    """)
+
+    assert body[3:] == [
+        "try_begin L1",
+        "t1 = a[5]",
+        "print t1",
+        "try_end",
+        "goto L2",
+        "L1:",
+        "err = catch",
+        "print err",
+        "L2:",
+    ]

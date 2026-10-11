@@ -18,7 +18,7 @@ from CompiscriptParser import CompiscriptParser
 from analyzer import SemanticAnalyzer
 from ir import tac
 from ir.tac import Quad, TACProgram, TempAllocator, LabelAllocator
-from semantic import FunctionSymbol, ClassSymbol, FunctionType, VOID
+from semantic import FunctionSymbol, ClassSymbol, FunctionType, ActivationRecord, ThisSlot, VOID
 
 
 class _FunctionContext:
@@ -42,6 +42,8 @@ class TACGenerator(ParseTreeVisitor):
         self._stack: list[_FunctionContext] = []
         self._names = {}  # id(simbolo) -> nombre unico en el TAC
         self._used_names = {}  # etiqueta de funcion / 'global' -> nombres ya usados
+        self.classes = [s for s in analyzer.table.global_scope.symbols.values() if isinstance(s, ClassSymbol)]
+        self._class_init = {}  # ClassSymbol -> etiqueta de su inicializador de campos (o None)
 
     # ------------------------------------------------------------------
     # punto de entrada
@@ -290,23 +292,30 @@ class TACGenerator(ParseTreeVisitor):
     # funciones
     # ------------------------------------------------------------------
 
-    def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
-        symbol: FunctionSymbol = self.analyzer.symbol_of[ctx]
-        function = _FunctionContext(symbol.label, symbol)
+    def _generate_function(self, label: str, frame: ActivationRecord, emit_body, symbol=None):
+        function = _FunctionContext(label, symbol)
         self._stack.append(function)
 
-        begin = self._emit(Quad(tac.FUNC_BEGIN, symbol.label, "0"))
-        for param in symbol.params:
-            self._name(param)
-        self.visit(ctx.block())
+        begin = self._emit(Quad(tac.FUNC_BEGIN, label, "0"))
+        emit_body()
         if not function.code.code or function.code.code[-1].op != tac.RETURN:
             self._emit(Quad(tac.RETURN))
-        self._emit(Quad(tac.FUNC_END, symbol.label))
+        self._emit(Quad(tac.FUNC_END, label))
 
-        symbol.frame.temp_count = function.temps.max_live
-        begin.arg2 = str(symbol.frame.total_size)
+        frame.temp_count = function.temps.max_live
+        begin.arg2 = str(frame.total_size)
         self._stack.pop()
         self.functions.append(function)
+
+    def visitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
+        symbol: FunctionSymbol = self.analyzer.symbol_of[ctx]
+
+        def body():
+            for param in symbol.params:
+                self._name(param)
+            self.visit(ctx.block())
+
+        self._generate_function(symbol.label, symbol.frame, body, symbol)
 
     def visitReturnStatement(self, ctx: CompiscriptParser.ReturnStatementContext):
         if ctx.expression() is None:
@@ -315,6 +324,148 @@ class TACGenerator(ParseTreeVisitor):
         value = self.visit(ctx.expression())
         self._release(value)
         self._emit(Quad(tac.RETURN, value))
+
+    # ------------------------------------------------------------------
+    # clases y objetos
+    # ------------------------------------------------------------------
+
+    def visitClassDeclaration(self, ctx: CompiscriptParser.ClassDeclarationContext):
+        class_symbol: ClassSymbol = self.analyzer.symbol_of[ctx]
+        for member in ctx.classMember():
+            if member.functionDeclaration() is not None:
+                self.visit(member.functionDeclaration())
+        self._generate_class_init(class_symbol, ctx)
+
+    @staticmethod
+    def _field_initializer(decl):
+        if isinstance(decl, CompiscriptParser.ConstantDeclarationContext):
+            return decl.expression()
+        return decl.initializer().expression() if decl.initializer() is not None else None
+
+    def _generate_class_init(self, class_symbol: ClassSymbol, ctx):
+        """Genera `Clase.__init`, que ejecuta los inicializadores de los campos.
+
+        Primero llama al inicializador de la superclase (si tiene) y luego
+        asigna los campos propios con valor inicial. `new` lo invoca antes
+        del constructor.
+        """
+        initialized = []
+        for member in ctx.classMember():
+            decl = member.variableDeclaration() or member.constantDeclaration()
+            if decl is not None and self._field_initializer(decl) is not None:
+                initialized.append((decl.Identifier().getText(), self._field_initializer(decl)))
+
+        super_init = self._class_init.get(class_symbol.superclass) if class_symbol.superclass else None
+        if not initialized and super_init is None:
+            self._class_init[class_symbol] = None
+            return
+
+        label = f"{class_symbol.name}.__init"
+        self._class_init[class_symbol] = label
+        frame = ActivationRecord(label)
+        frame.allocate(ThisSlot(class_symbol.type), "param")
+
+        def body():
+            if super_init is not None:
+                self._emit(Quad(tac.PARAM, "this"))
+                self._emit(Quad(tac.CALL, super_init, "1"))
+            for name, expr in initialized:
+                value = self.visit(expr)
+                self._release(value)
+                self._emit(Quad(tac.STORE_FIELD, name, value, "this"))
+
+        self._generate_function(label, frame, body)
+
+    def visitNewExpr(self, ctx: CompiscriptParser.NewExprContext):
+        class_symbol: ClassSymbol = self.analyzer.symbol_of[ctx]
+        obj = self._new_temp()
+        self._emit(Quad(tac.NEW, class_symbol.name, str(class_symbol.size), obj))
+
+        init = self._class_init.get(class_symbol)
+        if init is not None:
+            self._emit(Quad(tac.PARAM, obj))
+            self._emit(Quad(tac.CALL, init, "1"))
+
+        constructor = class_symbol.resolve_member("constructor")
+        if isinstance(constructor, FunctionSymbol):
+            args = [self.visit(a) for a in (ctx.arguments().expression() if ctx.arguments() else [])]
+            for value in [obj] + args:
+                self._emit(Quad(tac.PARAM, value))
+            self._release(*args)
+            self._emit(Quad(tac.CALL, constructor.label, str(len(args) + 1)))
+        return obj
+
+    def _is_overridden(self, class_symbol: ClassSymbol, method_name: str) -> bool:
+        return any(
+            other is not class_symbol and other.is_subclass_of(class_symbol) and method_name in other.methods
+            for other in self.classes
+        )
+
+    def _invoke_method(self, receiver: str, class_symbol: ClassSymbol, method: FunctionSymbol, args: list) -> str:
+        """Llamada a metodo: directa si ninguna subclase lo sobrescribe, o por la vtable del objeto."""
+        returns_value = self._returns_value(method.type)
+        if not self._is_overridden(class_symbol, method.name):
+            return self._call(method.label, args, receiver, returns_value)
+
+        slot = [m.name for m in class_symbol.vtable()].index(method.name)
+        values = [self.visit(a) for a in args]
+        target = self._new_temp()
+        self._emit(Quad(tac.LOAD_FIELD, receiver, "vtable", target))
+        self._emit(Quad(tac.LOAD_INDEX, target, str(slot), target))
+        for value in [receiver] + values:
+            self._emit(Quad(tac.PARAM, value))
+        self._release(receiver, target, *values)
+        result = self._new_temp() if returns_value else None
+        self._emit(Quad(tac.CALL, target, str(len(values) + 1), result))
+        return result
+
+    # ------------------------------------------------------------------
+    # arreglos, foreach y try/catch
+    # ------------------------------------------------------------------
+
+    def visitArrayLiteral(self, ctx: CompiscriptParser.ArrayLiteralContext):
+        elements = ctx.expression()
+        array = self._new_temp()
+        self._emit(Quad(tac.NEW_ARRAY, str(len(elements)), result=array))
+        for i, element in enumerate(elements):
+            value = self.visit(element)
+            self._release(value)
+            self._emit(Quad(tac.STORE_INDEX, str(i), value, array))
+        return array
+
+    def visitForeachStatement(self, ctx: CompiscriptParser.ForeachStatementContext):
+        """foreach (x in arr) se traduce a un recorrido por indice de 0 a len(arr) - 1."""
+        item = self._name(self.analyzer.symbol_of[ctx])
+        array = self.visit(ctx.expression())
+        index, length = self._new_temp(), self._new_temp()
+        self._emit(Quad(tac.ASSIGN, "0", result=index))
+        self._emit(Quad(tac.LENGTH, array, result=length))
+
+        start_label, next_label, end_label = self._label(), self._label(), self._label()
+        self._place_label(start_label)
+        test = self._new_temp()
+        self._emit(Quad(tac.BINARY, index, length, test, operator="<"))
+        self._release(test)
+        self._emit(Quad(tac.IF_FALSE, test, result=end_label))
+        self._emit(Quad(tac.LOAD_INDEX, array, index, item))
+        self._loop_body(ctx.block(), end_label, next_label)
+        self._place_label(next_label)
+        self._emit(Quad(tac.BINARY, index, "1", index, operator="+"))
+        self._emit(Quad(tac.GOTO, result=start_label))
+        self._place_label(end_label)
+        self._release(array, index, length)
+
+    def visitTryCatchStatement(self, ctx: CompiscriptParser.TryCatchStatementContext):
+        """try_begin registra el manejador; un error en tiempo de ejecucion salta a su etiqueta."""
+        catch_label, end_label = self._label(), self._label()
+        self._emit(Quad(tac.TRY_BEGIN, result=catch_label))
+        self.visit(ctx.block(0))
+        self._emit(Quad(tac.TRY_END))
+        self._emit(Quad(tac.GOTO, result=end_label))
+        self._place_label(catch_label)
+        self._emit(Quad(tac.CATCH, result=self._name(self.analyzer.symbol_of[ctx])))
+        self.visit(ctx.block(1))
+        self._place_label(end_label)
 
     def _call(self, label: str, args: list, this: str = None, returns_value: bool = True) -> str:
         """Evalua los argumentos, emite los `param` y la llamada; devuelve el operando del resultado."""
@@ -476,21 +627,21 @@ class TACGenerator(ParseTreeVisitor):
         symbol = self.analyzer.symbol_of.get(atom)
         args = call.arguments().expression() if call.arguments() else []
         if isinstance(symbol, FunctionSymbol):
-            # Un metodo invocado sin 'this.' dentro de su propia clase recibe el 'this' actual.
-            this = "this" if symbol.owner_class is not None else None
-            return self._call(symbol.label, args, this, self._returns_value(symbol.type))
+            if symbol.owner_class is not None:
+                # Un metodo invocado sin 'this.' dentro de su propia clase recibe el 'this' actual.
+                return self._invoke_method("this", symbol.owner_class, symbol, args)
+            return self._call(symbol.label, args, None, self._returns_value(symbol.type))
         return self._call(atom.getText(), args)
 
     def _call_method(self, receiver: str, access, call) -> str:
         base_type = self.analyzer.suffix_base.get(access)
+        class_symbol = getattr(base_type, "class_symbol", None)
         method_name = access.Identifier().getText()
-        method = None
-        if base_type is not None and getattr(base_type, "class_symbol", None) is not None:
-            method = base_type.class_symbol.resolve_member(method_name)
-        label = method.label if isinstance(method, FunctionSymbol) else method_name
+        method = class_symbol.resolve_member(method_name) if class_symbol is not None else None
         args = call.arguments().expression() if call.arguments() else []
-        returns_value = self._returns_value(method.type) if method is not None else True
-        return self._call(label, args, receiver, returns_value)
+        if isinstance(method, FunctionSymbol):
+            return self._invoke_method(receiver, class_symbol, method, args)
+        return self._call(method_name, args, receiver)
 
     def _apply_suffix(self, current: str, suffix) -> str:
         if isinstance(suffix, CompiscriptParser.IndexExprContext):
