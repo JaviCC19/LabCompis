@@ -1031,3 +1031,20 @@ def test_boolean_value_with_or_still_short_circuits_into_a_temporary():
     """)
 
     assert body[2:] == ["t1 = a", "if t1 goto L1", "t1 = b", "L1:", "c = t1"]
+
+
+def test_variables_named_like_temporaries_or_registers_are_renamed():
+    body = main_body("""
+        let t1: integer = 2;
+        let fp: integer = 1;
+        let r: integer = t1 * 3 + t1 * fp;
+    """)
+
+    assert body == [
+        "t1_1 = 2",
+        "fp_1 = 1",
+        "t1 = t1_1 * 3",
+        "t2 = t1_1 * fp_1",
+        "t1 = t1 + t2",
+        "r = t1",
+    ]

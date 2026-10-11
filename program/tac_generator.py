@@ -114,6 +114,8 @@ class TACGenerator(ParseTreeVisitor):
     def _place_label(self, label: str):
         self._emit(Quad(tac.LABEL, result=label))
 
+    _RESERVED = ("fp", "gp")
+
     def _name(self, symbol) -> str:
         """Nombre del simbolo en el TAC; se desambiguan variables que se ocultan entre si."""
         key = id(symbol)
@@ -126,7 +128,10 @@ class TACGenerator(ParseTreeVisitor):
             global_used = self._used_names.setdefault("global", set())
             name = symbol.name
             suffix = 1
-            while name in used or (area != "global" and name in global_used):
+            # Un nombre que parece temporal (t1) o registro base (fp, gp) se
+            # renombra para no confundirse con ellos en el TAC.
+            while name in used or (area != "global" and name in global_used) \
+                    or tac.is_temp(name) or name in self._RESERVED:
                 name = f"{symbol.name}_{suffix}"
                 suffix += 1
             used.add(name)
