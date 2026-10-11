@@ -52,7 +52,10 @@ class SemanticAnalyzer(CompiscriptListener):
         self.switch_depth = 0
 
         self.types = {}  # ctx de expresion -> Type ya inferido/verificado
-        self._suffix_base = {}  # SuffixOpContext -> Type sobre el que se aplico
+        self.suffix_base = {}  # SuffixOpContext -> Type sobre el que se aplico
+        # ctx -> simbolo que declara o al que se refiere (declaraciones, identificadores,
+        # funciones, clases, foreach/catch). Lo usa el generador de TAC.
+        self.symbol_of = {}
         self._decl_symbols = {}  # ctx de declaracion -> simbolo, mientras se visita su inicializador
 
         self.globals = MemoryArea("global", "global")  # segmento de datos de las variables globales
@@ -141,6 +144,7 @@ class SemanticAnalyzer(CompiscriptListener):
             name = parent.Identifier().getText()
             symbol = VariableSymbol(name, None, initialized=True)
             self._define(symbol, parent, "variable de catch")
+            self.symbol_of[parent] = symbol
             self._allocate(symbol)
         elif isinstance(parent, CompiscriptParser.ForeachStatementContext):
             name = parent.Identifier().getText()
@@ -153,6 +157,7 @@ class SemanticAnalyzer(CompiscriptListener):
                 element_type = None
             symbol = VariableSymbol(name, element_type, initialized=True)
             self._define(symbol, parent, "variable de foreach")
+            self.symbol_of[parent] = symbol
             self._allocate(symbol)
 
     def exitBlock(self, ctx: CompiscriptParser.BlockContext):
@@ -177,6 +182,7 @@ class SemanticAnalyzer(CompiscriptListener):
         symbol = self._decl_symbols.pop(ctx, None)
         if symbol is None:
             return
+        self.symbol_of[ctx] = symbol
 
         if ctx.initializer() is not None:
             init_type = self._type(ctx.initializer().expression())
@@ -206,6 +212,7 @@ class SemanticAnalyzer(CompiscriptListener):
         symbol = self._decl_symbols.pop(ctx, None)
         if symbol is None:
             return
+        self.symbol_of[ctx] = symbol
 
         init_type = self._type(ctx.expression())
         if symbol.type is None:
@@ -231,6 +238,7 @@ class SemanticAnalyzer(CompiscriptListener):
         if len(expressions) == 1:
             value_type = self._type(expressions[0])
             symbol = self.table.resolve(member_name)
+            self.symbol_of[ctx] = symbol
             if symbol is None:
                 self._error(ctx, f"variable '{member_name}' no declarada")
             elif getattr(symbol, "is_const", False):
@@ -269,6 +277,7 @@ class SemanticAnalyzer(CompiscriptListener):
     def exitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
         text = ctx.Identifier().getText()
         symbol = self.table.resolve(text)
+        self.symbol_of[ctx] = symbol
         if symbol is None:
             self._error(ctx, f"variable '{text}' no declarada")
             self._set_type(ctx, ERROR)
@@ -284,6 +293,7 @@ class SemanticAnalyzer(CompiscriptListener):
             return
 
         self._set_type(ctx, symbol.type)
+        self.symbol_of[ctx] = symbol
 
         args = ctx.arguments().expression() if ctx.arguments() else []
         arg_types = [self._type(a) for a in args]
@@ -557,7 +567,7 @@ class SemanticAnalyzer(CompiscriptListener):
     def exitLeftHandSide(self, ctx: CompiscriptParser.LeftHandSideContext):
         current = self._type(ctx.primaryAtom())
         for suffix in ctx.suffixOp():
-            self._suffix_base[suffix] = current
+            self.suffix_base[suffix] = current
             current = self._apply_suffix(suffix, current)
         self._set_type(ctx, current)
 
@@ -572,7 +582,7 @@ class SemanticAnalyzer(CompiscriptListener):
 
         last = suffixes[-1]
         if isinstance(last, CompiscriptParser.PropertyAccessExprContext):
-            base_type = self._suffix_base.get(last)
+            base_type = self.suffix_base.get(last)
             if isinstance(base_type, ClassType) and base_type.class_symbol is not None:
                 return base_type.class_symbol.resolve_member(last.Identifier().getText())
         return None
@@ -718,6 +728,7 @@ class SemanticAnalyzer(CompiscriptListener):
         elif self.function_stack:
             symbol.label = f"{self.function_stack[-1].label}.{symbol.name}"
         symbol.frame = ActivationRecord(symbol.label)
+        self.symbol_of[ctx] = symbol
         self.functions.append(symbol)
         if symbol.owner_class is not None:
             symbol.frame.allocate(ThisSlot(symbol.owner_class.type), "param")
@@ -778,6 +789,7 @@ class SemanticAnalyzer(CompiscriptListener):
 
         symbol = ClassSymbol(name, superclass=superclass)
         self._define(symbol, ctx, "clase")
+        self.symbol_of[ctx] = symbol
 
         scope = self.table.enter_scope(ScopeKind.CLASS, owner=symbol)
         symbol.scope = scope
