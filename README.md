@@ -18,7 +18,7 @@ y [ARCHITECTURE.md](ARCHITECTURE.md) para el detalle de la arquitectura, y
 program/
   Compiscript.g4        Gramática ANTLR (lexer + parser)
   Driver.py              Punto de entrada CLI: compila un .cps, reporta errores y opcionalmente
-                          exporta el arbol (--tree), el TAC (--tac) y la tabla de simbolos (--symbols)
+                          exporta el arbol (--tree), el TAC (--tac, --addr) y la tabla de simbolos (--symbols)
   compiler.py            Pipeline: parser -> analisis semantico -> generacion de TAC
   analyzer.py            Analisis semantico (Listener) + asignacion de direcciones
   tac_generator.py       Generacion de codigo de tres direcciones (Visitor)
@@ -32,6 +32,7 @@ program/
 
 vscode-extension/        Extension de VS Code (cliente LSP) que actua como el "IDE" del proyecto
 ARCHITECTURE.md           Documentacion de arquitectura
+TAC.md                    Documentacion del codigo intermedio (instrucciones, memoria, ejemplos, supuestos)
 ```
 
 ## Entorno de desarrollo (Docker)
@@ -67,16 +68,47 @@ El proyecto se construye y ejecuta dentro de un contenedor Docker que trae Java
    direcciones y registros de activación:
 
    ```bash
-   python3 Driver.py program.cps --tac              # a stdout
-   python3 Driver.py program.cps --tac salida.tac   # a un archivo
-   python3 Driver.py program.cps --symbols
+   python3 Driver.py program.cps --tac              # TAC por nombre, a stdout
+   python3 Driver.py program.cps --tac --addr       # TAC con direcciones (gp[+k], fp[+k], this[+k])
+   python3 Driver.py program.cps --tac salida.tac   # a un archivo (combinable con --addr)
+   python3 Driver.py program.cps --symbols          # tabla de simbolos y registros de activacion
    ```
 
-6. Correr la batería de tests:
+   Si el programa tiene errores, el Driver imprime cada uno con su
+   `linea:columna`, no genera TAC y termina con código 1.
+
+6. Correr la batería de tests (desde `program/`):
 
    ```bash
-   pytest
+   pytest -q
    ```
+
+### Alternativa sin Docker
+
+Si no se tiene Docker, el parser se puede generar con
+[`antlr4-tools`](https://pypi.org/project/antlr4-tools/), usando la misma
+versión que el runtime (4.13.1). La primera vez descarga el jar de ANTLR
+(y un JRE si no hay Java instalado):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r program/requirements.txt antlr4-tools
+cd program
+antlr4 -v 4.13.1 -Dlanguage=Python3 Compiscript.g4
+pytest -q
+python3 Driver.py program.cps --tac --symbols
+```
+
+En macOS, `/usr/bin/java` existe aunque no haya Java instalado, y
+`antlr4-tools` no descarga el JRE por su cuenta. En ese caso se instala
+Java (p.ej. `brew install openjdk`) o se usa el JRE que instala la propia
+herramienta:
+
+```bash
+python -c "import antlr4_tool_runner as r; print(r.install_jre())"   # deja un JRE 11 en ~/.jre
+~/.jre/jdk-11*/Contents/Home/bin/java -jar ~/.m2/repository/org/antlr/antlr4/4.13.1/antlr4-4.13.1-complete.jar \
+    -Dlanguage=Python3 Compiscript.g4
+```
 
 Los archivos generados por ANTLR (`CompiscriptLexer.py`, `CompiscriptParser.py`, etc.)
 no se versionan — se regeneran a partir de `Compiscript.g4` en cada build.
@@ -124,6 +156,7 @@ pip install -r requirements.txt
 ```bash
 cd vscode-extension
 npm install
+npm run compile   # verifica la sintaxis de la extension (es JavaScript, no se transpila)
 ```
 
 ### 3. Correr la extensión
@@ -144,9 +177,10 @@ npm install
    archivo activo en un panel lateral.
 
 Para compilar el archivo activo, corre **"Compiscript: Compilar y mostrar
-codigo intermedio (TAC)"**. El TAC y la tabla de símbolos con direcciones
-se abren en un documento al lado del editor. Si el programa tiene errores,
-la extensión los indica y no genera el TAC.
+codigo intermedio (TAC)"**. Se abre al lado del editor un documento con el
+TAC por nombre, el mismo TAC con direcciones y la tabla de símbolos con
+direcciones y registros de activación. Si el programa tiene errores, la
+extensión muestra el primero (con su línea:columna) y no genera el TAC.
 
 Si algo se traba, **"Compiscript: Reiniciar servidor de análisis"**
 reinicia el proceso del servidor sin cerrar VS Code.
@@ -167,13 +201,29 @@ reinicia el proceso del servidor sin cerrar VS Code.
 
 ### Fase de generación de código intermedio
 
-- [x] Diseño del TAC en cuádruplos (`ir/tac.py`, documentado en `TAC.md`).
-- [x] Tabla de símbolos con direcciones, tamaños, registros de activación,
-      layout de objetos y vtables.
-- [x] Asignación y reciclaje de temporales.
-- [x] Generación de TAC: expresiones (con cortocircuito), asignaciones, control
-      de flujo, `switch`, funciones y recursión, clases/objetos con despacho
-      dinámico, arreglos, `foreach`, `try/catch`.
-- [x] `--tac` y `--symbols` en `Driver.py`.
-- [x] Tests del TAC (`tests/test_tac*.py`, `tests/test_memory_layout.py`, `tests/test_compiler.py`).
+- [x] Diseño del TAC en cuádruplos (`ir/tac.py`, documentado en `TAC.md`),
+      con salida por nombre y con direcciones (`--tac --addr`).
+- [x] Tabla de símbolos con storage, offset, tamaño, nivel de anidamiento,
+      etiqueta y dirección por símbolo; registros de activación con
+      parámetros, locales, temporales, tamaño, enlace de control y enlace
+      de acceso; layout de objetos y vtables. `main` tiene su propio
+      registro (solo temporales; las variables de nivel superior están en
+      el segmento global).
+- [x] Asignación y reciclaje de temporales; `max_live` por función define
+      el tamaño de su registro (también con temporales vivos a través de
+      `call`).
+- [x] Generación de TAC: expresiones, condiciones como código de saltos
+      con cortocircuito, ternario, asignaciones, `const`, control de flujo,
+      `break`/`continue` anidados, `switch` con y sin `default`, funciones
+      y recursión, funciones anidadas con enlace de acceso explícito,
+      clases con herencia de varios niveles y despacho dinámico, `this`
+      implícito (también para miembros heredados), arreglos y matrices,
+      `foreach`, `try/catch` con `try_end` en todos los caminos.
+- [x] Chequeos explícitos en el TAC: límites de arreglos y división/módulo
+      entre cero, con `throw` hacia el manejador activo.
+- [x] Programas con errores no generan TAC y reportan `linea:columna`.
+- [x] `--tac`, `--addr` y `--symbols` en `Driver.py`.
+- [x] Tests (`pytest -q` desde `program/`): `tests/test_tac*.py`,
+      `tests/test_memory_layout.py`, `tests/test_compiler.py` y los del
+      análisis semántico.
 - [x] Comando **"Compiscript: Compilar y mostrar codigo intermedio (TAC)"** en la extensión de VS Code.
