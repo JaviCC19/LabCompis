@@ -10,8 +10,8 @@ ofrecerle a un editor (VS Code, via `vscode-extension/`) dos cosas:
      sintactico del ultimo parseo exitoso como JSON, para pintarlo en un
      webview (ver `vscode-extension/src/parseTreePanel.js`).
   3. Un request custom `compiscript/tac` que compila el documento y
-     devuelve su codigo de tres direcciones y la tabla de simbolos con
-     direcciones (o los errores, si los hay).
+     devuelve su codigo de tres direcciones (por nombre y con direcciones)
+     y la tabla de simbolos con direcciones (o los errores, si los hay).
 
 No se agrega logica semantica aqui: este archivo es solo el adaptador
 entre `analyzer.py` y el protocolo LSP.
@@ -130,7 +130,11 @@ def tac(ls: LanguageServer, params):
     result = compile_source(ls.workspace.get_text_document(uri).source)
     if result.errors:
         return {"errors": result.errors}
-    return {"tac": str(result.tac), "symbols": describe_memory(result.analyzer, result.init_frames)}
+    return {
+        "tac": result.tac.text(),
+        "tac_addr": result.tac.text(addresses=True),
+        "symbols": describe_memory(result.analyzer, result.init_frames),
+    }
 
 
 if __name__ == "__main__":

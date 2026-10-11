@@ -91,7 +91,7 @@ function activate(context) {
         }
         if (result.errors) {
           vscode.window.showErrorMessage(
-            `El programa tiene ${result.errors.length} error(es); corrigelos para generar el TAC.`
+            `El programa tiene ${result.errors.length} error(es); corrigelos para generar el TAC: ${result.errors[0]}`
           );
           return;
         }
@@ -102,6 +102,10 @@ function activate(context) {
           `; Codigo intermedio (TAC) de ${name}`,
           "",
           result.tac,
+          "",
+          "; El mismo TAC con direcciones (gp = segmento global, fp = registro de activacion, this = objeto)",
+          "",
+          result.tac_addr,
           "",
           "; Tabla de simbolos con direcciones y registros de activacion",
           symbols,

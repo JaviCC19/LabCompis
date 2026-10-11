@@ -18,7 +18,7 @@ from CompiscriptParser import CompiscriptParser
 from analyzer import SemanticAnalyzer
 from ir import tac
 from ir.tac import Quad, TACProgram, TempAllocator, LabelAllocator
-from semantic import FunctionSymbol, ClassSymbol, FunctionType, ActivationRecord, ThisSlot, VOID
+from semantic import FunctionSymbol, ClassSymbol, FunctionType, ActivationRecord, ThisSlot, VOID, format_address
 
 
 class _FunctionContext:
@@ -49,6 +49,7 @@ class TACGenerator(ParseTreeVisitor):
         self.functions: list[_FunctionContext] = []  # funciones ya generadas, en orden
         self._stack: list[_FunctionContext] = []
         self._names = {}  # id(simbolo) -> nombre unico en el TAC
+        self._named = {}  # area ('global' o etiqueta de funcion) -> {nombre en el TAC -> simbolo}
         self._used_names = {}  # etiqueta de funcion / 'global' -> nombres ya usados
         self.classes = [s for s in analyzer.table.global_scope.symbols.values() if isinstance(s, ClassSymbol)]
         self._class_init = {}  # ClassSymbol -> etiqueta de su inicializador de campos (o None)
@@ -68,6 +69,7 @@ class TACGenerator(ParseTreeVisitor):
         self._emit(Quad(tac.FUNC_END, "main"))
         main.frame.temp_count = main.temps.max_live
         begin.arg2 = str(main.frame.data_size)
+        self._attach_addresses(main)
         self._stack.pop()
 
         program = TACProgram()
@@ -129,6 +131,7 @@ class TACGenerator(ParseTreeVisitor):
                 suffix += 1
             used.add(name)
             self._names[key] = name
+            self._named.setdefault(area, {})[name] = symbol
         return self._names[key]
 
     # --- errores en tiempo de ejecucion -------------------------------------
@@ -245,6 +248,15 @@ class TACGenerator(ParseTreeVisitor):
         self._emit(Quad(tac.LINK, base))
         self._release(base)
 
+    @staticmethod
+    def _member_offset(class_type, name: str):
+        """Offset en bytes del campo `name` en el layout de la clase (None si no se conoce)."""
+        if name == "vtable":
+            return 0
+        class_symbol = getattr(class_type, "class_symbol", None)
+        member = class_symbol.resolve_member(name) if class_symbol is not None else None
+        return getattr(member, "offset", None) if member is not None and member.storage == "field" else None
+
     def _store_variable(self, symbol, value: str):
         """Guarda `value` en la variable `symbol` (un campo se guarda a traves de `this`)."""
         if symbol.storage == "field":
@@ -301,7 +313,9 @@ class TACGenerator(ParseTreeVisitor):
         target = self.visit(expressions[0])
         value = self.visit(expressions[1])
         self._release(target, value)
-        self._emit(Quad(tac.STORE_FIELD, ctx.Identifier().getText(), value, target))
+        name = ctx.Identifier().getText()
+        offset = self._member_offset(self.analyzer.types.get(expressions[0]), name)
+        self._emit(Quad(tac.STORE_FIELD, name, value, target, offset=offset))
 
     def visitExpressionStatement(self, ctx: CompiscriptParser.ExpressionStatementContext):
         self._release(self.visit(ctx.expression()))
@@ -424,6 +438,18 @@ class TACGenerator(ParseTreeVisitor):
     # funciones
     # ------------------------------------------------------------------
 
+    def _attach_addresses(self, function: _FunctionContext):
+        """Asocia a cada cuadruplo de la funcion la direccion de sus operandos (modo --addr)."""
+        frame = function.frame
+        addresses = {name: symbol.address for name, symbol in self._named.get("global", {}).items()}
+        addresses.update(
+            (name, symbol.address) for name, symbol in self._named.get(function.label, {}).items()
+        )
+        for number in range(1, frame.temp_count + 1):
+            addresses[f"t{number}"] = format_address("fp", frame.temp_offset(number))
+        for quad in function.code:
+            quad.addresses = addresses
+
     def _generate_function(self, label: str, frame: ActivationRecord, emit_body, symbol=None):
         function = _FunctionContext(label, symbol, frame)
         self._stack.append(function)
@@ -437,6 +463,7 @@ class TACGenerator(ParseTreeVisitor):
 
         frame.temp_count = function.temps.max_live
         begin.arg2 = str(frame.data_size)
+        self._attach_addresses(function)
         self._stack.pop()
         self.functions.append(function)
 
@@ -506,7 +533,8 @@ class TACGenerator(ParseTreeVisitor):
             for name, expr in initialized:
                 value = self.visit(expr)
                 self._release(value)
-                self._emit(Quad(tac.STORE_FIELD, name, value, "this"))
+                offset = self._member_offset(class_symbol.type, name)
+                self._emit(Quad(tac.STORE_FIELD, name, value, "this", offset=offset))
 
         self._generate_function(label, frame, body)
 
@@ -544,7 +572,7 @@ class TACGenerator(ParseTreeVisitor):
         slot = [m.name for m in class_symbol.vtable()].index(method.name)
         values = [self.visit(a) for a in args]
         target = self._new_temp()
-        self._emit(Quad(tac.LOAD_FIELD, receiver, "vtable", target))
+        self._emit(Quad(tac.LOAD_FIELD, receiver, "vtable", target, offset=0))
         self._emit(Quad(tac.LOAD_INDEX, target, str(slot), target))
         for value in [receiver] + values:
             self._emit(Quad(tac.PARAM, value))
@@ -805,7 +833,9 @@ class TACGenerator(ParseTreeVisitor):
         if isinstance(suffix, CompiscriptParser.PropertyAccessExprContext):
             self._release(current)
             result = self._new_temp()
-            self._emit(Quad(tac.LOAD_FIELD, current, suffix.Identifier().getText(), result))
+            name = suffix.Identifier().getText()
+            offset = self._member_offset(self.analyzer.suffix_base.get(suffix), name)
+            self._emit(Quad(tac.LOAD_FIELD, current, name, result, offset=offset))
             return result
 
         # llamada sobre un valor ya calculado (p.ej. el resultado de otra llamada)
@@ -842,13 +872,17 @@ class TACGenerator(ParseTreeVisitor):
             self._release(base, index)
         else:
             value = self.visit(ctx.assignmentExpr())
-            self._emit(Quad(tac.STORE_FIELD, last.Identifier().getText(), value, base))
+            name = last.Identifier().getText()
+            offset = self._member_offset(self.analyzer.suffix_base.get(last), name)
+            self._emit(Quad(tac.STORE_FIELD, name, value, base, offset=offset))
             self._release(base)
         return value
 
     def visitPropertyAssignExpr(self, ctx: CompiscriptParser.PropertyAssignExprContext):
         base = self.visit(ctx.leftHandSide())
         value = self.visit(ctx.assignmentExpr())
-        self._emit(Quad(tac.STORE_FIELD, ctx.Identifier().getText(), value, base))
+        name = ctx.Identifier().getText()
+        offset = self._member_offset(self.analyzer.types.get(ctx.leftHandSide()), name)
+        self._emit(Quad(tac.STORE_FIELD, name, value, base, offset=offset))
         self._release(base)
         return value

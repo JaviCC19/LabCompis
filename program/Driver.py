@@ -6,7 +6,8 @@ from compiler import compile_source, describe_memory
 from tree_export import tree_to_dict, tree_to_dot
 
 
-def main(path: str, tree_output: str = None, tac_output: str = None, show_symbols: bool = False) -> int:
+def main(path: str, tree_output: str = None, tac_output: str = None, show_symbols: bool = False,
+         addresses: bool = False) -> int:
     with open(path, encoding="utf-8-sig") as f:  # -sig: ignora el BOM que agregan algunos editores
         result = compile_source(f.read())
 
@@ -28,10 +29,10 @@ def main(path: str, tree_output: str = None, tac_output: str = None, show_symbol
         print(describe_memory(result.analyzer, result.init_frames))
 
     if tac_output == "-":
-        print(result.tac)
+        print(result.tac.text(addresses))
     elif tac_output is not None:
         with open(tac_output, "w", encoding="utf-8") as f:
-            f.write(str(result.tac) + "\n")
+            f.write(result.tac.text(addresses) + "\n")
         print(f"Codigo intermedio escrito en '{tac_output}'")
 
     return 0
@@ -49,5 +50,10 @@ if __name__ == "__main__":
         "--symbols", action="store_true",
         help="muestra la tabla de simbolos con direcciones y registros de activacion",
     )
+    arg_parser.add_argument(
+        "--addr", action="store_true",
+        help="con --tac: muestra los operandos como direcciones (gp[+k], fp[+k], this[+k]) en vez de nombres",
+    )
     args = arg_parser.parse_args()
-    sys.exit(main(args.archivo, args.tree, args.tac, args.symbols))
+    tac_output = args.tac if args.tac is not None or not args.addr else "-"  # --addr solo implica --tac
+    sys.exit(main(args.archivo, args.tree, tac_output, args.symbols, args.addr))
