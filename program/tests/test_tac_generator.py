@@ -873,5 +873,51 @@ def test_matrix_write_checks_both_dimensions():
     ]
 
 
+def test_division_and_modulo_by_variable_check_for_zero():
+    body = main_body("""
+        let a: integer = 10;
+        let b: integer = 2;
+        let c: integer = a / b % b;
+    """)
+
+    assert body[2:] == [
+        "t1 = b == 0",
+        "if t1 goto L1",
+        "t1 = a / b",
+        "t2 = b == 0",
+        "if t2 goto L1",
+        "t1 = t1 % b",
+        "c = t1",
+        "return",
+        "L1:",
+        'throw "division entre cero"',
+    ]
+
+
+def test_division_by_nonzero_literal_is_not_checked():
+    body = main_body("let a: integer = 10; let c: integer = a / 2; let d: float = 1.0 / 0.5;")
+
+    assert "throw" not in "\n".join(body)
+
+
+def test_division_by_literal_zero_is_checked():
+    body = main_body("let a: integer = 10; let c: integer = a / 0;")
+
+    assert body[1:3] == ["t1 = 0 == 0", "if t1 goto L1"]
+    assert body[-1] == 'throw "division entre cero"'
+
+
+def test_each_error_kind_has_a_single_stub_per_function():
+    body = main_body("""
+        let a: integer[] = [1];
+        let i: integer = 0;
+        print(a[i] / i);
+        print(a[i] % i);
+    """)
+
+    assert body.count('throw "indice fuera de rango"') == 1
+    assert body.count('throw "division entre cero"') == 1
+
+
 def test_throw_quad_renders():
     assert str(Quad(tac.THROW, '"x"')) == 'throw "x"'

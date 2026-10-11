@@ -134,6 +134,7 @@ class TACGenerator(ParseTreeVisitor):
     # --- errores en tiempo de ejecucion -------------------------------------
 
     INDEX_ERROR = '"indice fuera de rango"'
+    ZERO_DIVISION_ERROR = '"division entre cero"'
 
     def _error_stub(self, message: str) -> str:
         """Etiqueta del stub que lanza `message`; se crea la primera vez que se pide."""
@@ -175,7 +176,21 @@ class TACGenerator(ParseTreeVisitor):
         self._emit(Quad(tac.IF, test, result=error))
         self._release(test)
 
+    def _check_divisor(self, divisor: str):
+        """Antes de '/' o '%': si el divisor es 0 se lanza un error (salvo literal distinto de 0)."""
+        try:
+            if float(divisor) != 0:
+                return
+        except ValueError:
+            pass
+        test = self._new_temp()
+        self._emit(Quad(tac.BINARY, divisor, "0", test, operator="=="))
+        self._emit(Quad(tac.IF, test, result=self._error_stub(self.ZERO_DIVISION_ERROR)))
+        self._release(test)
+
     def _binary(self, operator: str, left: str, right: str) -> str:
+        if operator in ("/", "%"):
+            self._check_divisor(right)
         self._release(left, right)
         result = self._new_temp()
         self._emit(Quad(tac.BINARY, left, right, result, operator=operator))
