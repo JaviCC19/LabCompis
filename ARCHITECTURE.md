@@ -1,7 +1,9 @@
 # Arquitectura
 
-Este documento describe cómo está organizado el compilador (fase de análisis
-léxico/sintáctico/semántico) y cómo encajan sus piezas.
+Este documento describe cómo está organizado el compilador (análisis
+léxico/sintáctico/semántico y generación de código intermedio) y cómo
+encajan sus piezas. El código intermedio se documenta en
+[`TAC.md`](TAC.md).
 
 ## Vista general
 
@@ -11,16 +13,25 @@ Compiscript.g4  --ANTLR-->  CompiscriptLexer.py / CompiscriptParser.py / Compisc
                                           v
                                   ParseTree (ANTLR)
                                           |
-                 +------------------------+------------------------+
-                 |                        |                        |
-                 v                        v                        v
-           analyzer.py            tree_export.py            Driver.py / lsp_server.py
-     (SemanticAnalyzer, un              (arbol -> dict/DOT          (puntos de entrada:
-      CompiscriptListener)               para visualizarlo)          CLI y editor)
-                 |
-                 v
-            semantic/ (agnóstico de ANTLR)
-       symbol_table.py + types_system.py + errors.py
+          +-------------------------------+---------------------------+
+          |                               |                           |
+          v                               v                           v
+    analyzer.py  ----------------->  tac_generator.py           tree_export.py
+ (SemanticAnalyzer: tipos, ambitos,  (TACGenerator: Visitor     (arbol -> dict/DOT
+  direcciones, niveles, frames)       que emite cuadruplos)      para visualizarlo)
+          |                               |
+          v                               v
+  semantic/ (agnostico de ANTLR)       ir/tac.py (Quad, TACProgram,
+  symbol_table.py + types_system.py    TempAllocator, LabelAllocator)
+  + runtime.py + errors.py
+                                          |
+        compiler.py (pipeline: parser -> analisis -> TAC, describe_memory)
+                                          |
+                     +--------------------+--------------------+
+                     v                                         v
+               Driver.py (CLI)                      lsp_server.py (editor, LSP)
+                                                               |
+                                                    vscode-extension/ (cliente)
 ```
 
 La regla de diseño principal es que **`semantic/` no conoce ANTLR**: no
@@ -97,13 +108,27 @@ declaración, identificador, función, clase y variable de
 `foreach`/`catch`), `suffix_base` (el tipo sobre el que se aplica cada
 `.campo`/`[i]`/`(...)`) y la lista `functions`. También asigna la
 **dirección** de cada variable (`_allocate`): segmento global, registro de
-activación de su función o, para los campos, el layout de su clase.
+activación de su función o, para los campos, el layout de su clase. Cada
+registro de activación recibe su **nivel de anidamiento** y el registro
+de la función que lo contiene léxicamente (destino de su enlace de
+acceso). El registro de `main` (`main_frame`) se crea aquí también.
+
+Los nombres sin calificar se resuelven con `_resolve_name`, que recorre
+los ámbitos hacia afuera y, al pasar por el ámbito de una clase, busca
+también los miembros heredados (así funciona el `this` implícito con
+campos y métodos de una superclase).
 
 ### `program/semantic/runtime.py` — memoria en tiempo de ejecución
 
 `size_of(tipo)`, `MemoryArea` (área contigua con offsets crecientes:
 segmento global) y `ActivationRecord` (registro de activación de una
-función: `this`, parámetros, locales y temporales). `ClassSymbol` calcula
+función: cabecera de 24 bytes en offsets negativos —dirección de retorno,
+enlace de control y enlace de acceso— y luego `this`, parámetros, locales
+y temporales). Cada símbolo ubicado queda con `storage`, `offset`,
+`size`, `level`, `area` y una dirección (`address_of`: `gp[+k]`,
+`fp[+k]` o `this[+k]`). El registro expone `params`, `locals`,
+`temp_count`, `data_size` (lo que reserva `begin_func`), `total_size`
+(con la cabecera), `temp_offset(n)` y `enclosing`. `ClassSymbol` calcula
 el layout de sus instancias (`compute_layout`: puntero a vtable, campos
 heredados y propios) y su `vtable()`. Al igual que el resto de
 `semantic/`, no depende de ANTLR.
@@ -112,7 +137,9 @@ heredados y propios) y su `vtable()`. Al igual que el resto de
 
 Define el TAC como cuádruplos (`Quad`), el contenedor `TACProgram`, el
 asignador de temporales con reciclaje (`TempAllocator`) y el de etiquetas
-(`LabelAllocator`). No conoce ANTLR ni la tabla de símbolos. El formato
+(`LabelAllocator`). No conoce ANTLR ni la tabla de símbolos: el modo con
+direcciones (`TACProgram.text(addresses=True)`) usa el mapa
+nombre→dirección y el offset que el generador deja en cada cuádruplo. El formato
 está documentado en [`TAC.md`](TAC.md).
 
 ### `program/tac_generator.py` — generación de TAC
@@ -124,8 +151,19 @@ quedó su valor (variable, temporal o literal). No vuelve a resolver
 nombres: usa `symbol_of`, `suffix_base` y las direcciones que dejó el
 analizador. Cada función se genera en su propio búfer
 (`_FunctionContext`), con su propio asignador de temporales y su propia
-pila de etiquetas de `break`/`continue`. Al cerrar la función, el tamaño
-de su registro de activación se completa con los temporales usados.
+pila de etiquetas de `break`/`continue` (con la cantidad de `try`
+abiertos al entrar a cada bucle, para emitir los `try_end` necesarios) y
+sus stubs de error (`throw`). Al cerrar la función, el tamaño de su
+registro de activación se completa con los temporales usados (`max_live`)
+y se asocia a cada cuádruplo la dirección de sus operandos.
+
+Además de traducir cada construcción, el generador hace explícito lo que
+la máquina necesita en tiempo de ejecución: el enlace de acceso para
+variables de funciones externas (`access_link`, `->`, `link`), el
+chequeo de límites antes de cada `a[i]`, el chequeo de divisor cero y
+el `try_end` en toda salida de un `try`. Las condiciones de control de
+flujo se traducen como código de saltos con cortocircuito
+(`_jump_if_false` / `_jump_if_true`).
 
 ### `program/compiler.py` — pipeline
 
@@ -146,10 +184,12 @@ las dos conoce reglas semánticas — sólo recorren la forma del
 ### `program/Driver.py` — CLI
 
 Punto de entrada por línea de comandos (sobre `compiler.py`): compila un
-`.cps` e imprime los errores de sintaxis o de semántica. Opciones:
+`.cps` e imprime los errores de sintaxis o de semántica (con
+`línea:columna`, código de salida 1, sin TAC). Opciones:
 `--tree <archivo.json|archivo.dot>` vuelca el árbol sintáctico, `--tac
-[archivo]` emite el código de tres direcciones y `--symbols` muestra la
-tabla de símbolos con direcciones y registros de activación.
+[archivo]` emite el código de tres direcciones, `--addr` lo muestra con
+direcciones en vez de nombres y `--symbols` muestra la tabla de símbolos
+con direcciones y registros de activación.
 
 ### `program/lsp_server.py` — servidor para el editor
 
@@ -160,7 +200,9 @@ construido con [`pygls`](https://github.com/openlawlibrary/pygls). Reutiliza
 publica los errores (de sintaxis y semánticos) como diagnósticos LSP —
 esto es lo que hace que aparezcan subrayados en rojo en el editor sin
 que el usuario ejecute nada manualmente. También expone un comando
-custom, `compiscript/parseTree`, que devuelve el árbol del último parseo
+custom, `compiscript/tac`, que compila el documento y devuelve el TAC
+por nombre, el TAC con direcciones y la tabla de símbolos (o los
+errores), y `compiscript/parseTree`, que devuelve el árbol del último parseo
 exitoso como JSON (vía `tree_export.tree_to_dict`).
 
 ### `vscode-extension/` — el "IDE"
@@ -174,6 +216,9 @@ una extensión de VS Code que actúa de cliente LSP:
 - `src/extension.js`: arranca `program/lsp_server.py` como proceso hijo
   (vía `vscode-languageclient`) y lo conecta a VS Code por stdio. De ahí
   en más, los diagnósticos semánticos aparecen solos en el editor.
+  También registra **"Compiscript: Compilar y mostrar codigo intermedio
+  (TAC)"** (abre al lado el TAC por nombre, el TAC con direcciones y la
+  tabla de símbolos) y **"Compiscript: Reiniciar servidor de analisis"**.
 - `src/parseTreePanel.js`: implementa el comando **"Compiscript: Mostrar
   árbol sintáctico"**, que le pide al servidor el árbol del archivo activo
   y lo pinta como una lista anidada colapsable en un panel webview — esta
