@@ -33,6 +33,7 @@ from .symbol_table import (
     DuplicateSymbolError,
 )
 from .errors import SemanticError
+from .runtime import MemoryArea, ActivationRecord, ThisSlot, size_of
 
 __all__ = [
     "Type",
@@ -66,4 +67,8 @@ __all__ = [
     "SymbolTable",
     "DuplicateSymbolError",
     "SemanticError",
+    "MemoryArea",
+    "ActivationRecord",
+    "ThisSlot",
+    "size_of",
 ]

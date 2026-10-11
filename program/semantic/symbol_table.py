@@ -9,6 +9,7 @@ excepciones que aqui se definen.
 from enum import Enum, auto
 
 from .types_system import FunctionType, ClassType, Type
+from .runtime import size_of
 
 
 class ScopeKind(Enum):
@@ -22,6 +23,11 @@ class Symbol:
     def __init__(self, name: str, type_: Type = None):
         self.name = name
         self.type = type_
+        # Direccion en tiempo de ejecucion (ver runtime.py): area donde vive
+        # ('global', 'param', 'local' o 'field'), offset dentro de ella y tamano.
+        self.storage = None
+        self.offset = None
+        self.size = None
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.name}: {self.type})"
@@ -46,6 +52,8 @@ class FunctionSymbol(Symbol):
         self.return_type = return_type
         self.scope = None  # Scope propio de la funcion, asignado al crearlo (closures)
         self.owner_class = None  # ClassSymbol si es un metodo, None si es funcion libre
+        self.label = name  # etiqueta de entrada en el TAC ('f', 'Clase.metodo', 'externa.interna')
+        self.frame = None  # ActivationRecord con params, locales y temporales
 
     @property
     def param_types(self):
@@ -59,6 +67,21 @@ class ClassSymbol(Symbol):
         self.fields: dict[str, VariableSymbol] = {}
         self.methods: dict[str, FunctionSymbol] = {}
         self.scope = None  # Scope propio de la clase, asignado al crearla
+        self.size = 0  # bytes que ocupa una instancia (incluye los campos heredados)
+
+    def compute_layout(self):
+        """Asigna offsets a los campos: primero los heredados, luego los propios."""
+        offset = self.superclass.size if self.superclass is not None else 0
+        for field in self.fields.values():
+            field.storage = "field"
+            field.offset = offset
+            field.size = size_of(field.type)
+            offset += field.size
+        self.size = offset
+
+    def all_fields(self) -> list:
+        inherited = self.superclass.all_fields() if self.superclass is not None else []
+        return inherited + list(self.fields.values())
 
     def resolve_member(self, name: str):
         if name in self.fields:
