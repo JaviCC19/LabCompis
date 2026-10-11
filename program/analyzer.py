@@ -741,10 +741,12 @@ class SemanticAnalyzer(CompiscriptListener):
                 symbol.owner_class = self.class_stack[-1]
             self._define(symbol, ctx, "funcion")
 
-        if symbol.owner_class is not None:
-            symbol.label = f"{symbol.owner_class.name}.{symbol.name}"
-        elif self.function_stack:
+        # Una funcion anidada (incluso dentro de un metodo) se califica con la
+        # etiqueta de la funcion que la contiene, para que sea unica.
+        if self.function_stack:
             symbol.label = f"{self.function_stack[-1].label}.{symbol.name}"
+        elif symbol.owner_class is not None:
+            symbol.label = f"{symbol.owner_class.name}.{symbol.name}"
         symbol.frame = ActivationRecord(symbol.label)
         self.symbol_of[ctx] = symbol
         self.functions.append(symbol)

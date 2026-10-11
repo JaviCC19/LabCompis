@@ -567,3 +567,36 @@ def test_inherited_field_with_implicit_this_reads_through_this():
     """, "B.get")
 
     assert body == ["t1 = this.v", "t1 = t1 + 10", "return t1"]
+
+
+def test_nested_functions_in_different_methods_get_unique_labels():
+    source = """
+        class A {
+          let v: integer = 1;
+          function f(): integer {
+            function aux(): integer { return v; }
+            return aux();
+          }
+          function g(): integer {
+            function aux(): integer { return 2; }
+            return aux();
+          }
+        }
+        class B : A { function aux(): integer { return 3; } }
+    """
+    result = lines(source)
+
+    assert "begin_func A.f.aux, 16" in result
+    assert "begin_func A.g.aux, 8" in result
+    # aux no es un metodo: se llama directo (no por la vtable) y recibe el 'this' del metodo
+    assert function_body(source, "A.f") == ["param this", "t1 = call A.f.aux, 1", "return t1"]
+    assert function_body(source, "A.f.aux") == ["t1 = this.v", "return t1"]
+
+
+def test_method_with_same_name_as_nested_function_is_still_virtual():
+    source = """
+        class A { function aux(): integer { return 1; } function h(): integer { return aux(); } }
+        class B : A { function aux(): integer { return 3; } }
+    """
+
+    assert function_body(source, "A.h")[:2] == ["t1 = this.vtable", "t1 = t1[0]"]

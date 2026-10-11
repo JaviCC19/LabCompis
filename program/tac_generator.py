@@ -627,9 +627,13 @@ class TACGenerator(ParseTreeVisitor):
         symbol = self.analyzer.symbol_of.get(atom)
         args = call.arguments().expression() if call.arguments() else []
         if isinstance(symbol, FunctionSymbol):
-            if symbol.owner_class is not None:
+            if symbol.owner_class is not None and symbol.owner_class.methods.get(symbol.name) is symbol:
                 # Un metodo invocado sin 'this.' dentro de su propia clase recibe el 'this' actual.
                 return self._invoke_method("this", symbol.owner_class, symbol, args)
+            if symbol.owner_class is not None:
+                # Funcion anidada dentro de un metodo: no esta en la vtable, se llama
+                # directo y recibe el mismo 'this' que el metodo que la contiene.
+                return self._call(symbol.label, args, "this", self._returns_value(symbol.type))
             return self._call(symbol.label, args, None, self._returns_value(symbol.type))
         return self._call(atom.getText(), args)
 
