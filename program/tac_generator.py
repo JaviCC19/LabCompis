@@ -329,10 +329,87 @@ class TACGenerator(ParseTreeVisitor):
     # control de flujo
     # ------------------------------------------------------------------
 
+    # --- condiciones como codigo de saltos (cortocircuito) -------------------
+
+    @staticmethod
+    def _unwrap(ctx):
+        """Baja por los niveles de precedencia que tienen un solo operando, y por los parentesis."""
+        P = CompiscriptParser
+        while True:
+            if isinstance(ctx, P.ExpressionContext):
+                ctx = ctx.assignmentExpr()
+            elif isinstance(ctx, P.ExprNoAssignContext):
+                ctx = ctx.conditionalExpr()
+            elif isinstance(ctx, P.TernaryExprContext) and not ctx.expression():
+                ctx = ctx.logicalOrExpr()
+            elif isinstance(ctx, P.LogicalOrExprContext) and len(ctx.logicalAndExpr()) == 1:
+                ctx = ctx.logicalAndExpr(0)
+            elif isinstance(ctx, P.LogicalAndExprContext) and len(ctx.equalityExpr()) == 1:
+                ctx = ctx.equalityExpr(0)
+            elif isinstance(ctx, P.EqualityExprContext) and len(ctx.relationalExpr()) == 1:
+                ctx = ctx.relationalExpr(0)
+            elif isinstance(ctx, P.RelationalExprContext) and len(ctx.additiveExpr()) == 1:
+                ctx = ctx.additiveExpr(0)
+            elif isinstance(ctx, P.AdditiveExprContext) and len(ctx.multiplicativeExpr()) == 1:
+                ctx = ctx.multiplicativeExpr(0)
+            elif isinstance(ctx, P.MultiplicativeExprContext) and len(ctx.unaryExpr()) == 1:
+                ctx = ctx.unaryExpr(0)
+            elif isinstance(ctx, P.UnaryExprContext) and ctx.unaryExpr() is None:
+                ctx = ctx.primaryExpr()
+            elif isinstance(ctx, P.PrimaryExprContext) and ctx.expression() is not None:
+                ctx = ctx.expression()
+            else:
+                return ctx
+
     def _jump_if_false(self, expr_ctx, label: str):
-        condition = self.visit(expr_ctx)
-        self._release(condition)
-        self._emit(Quad(tac.IF_FALSE, condition, result=label))
+        """Salta a `label` si la condicion es falsa; si es verdadera sigue de largo.
+
+        `a || b`, `a && b` y `!a` se traducen a saltos (cortocircuito): el
+        operando derecho solo se evalua si el izquierdo no decide el resultado.
+        """
+        ctx = self._unwrap(expr_ctx)
+        if isinstance(ctx, CompiscriptParser.LogicalOrExprContext):
+            true_label = self._label()
+            *first, last = ctx.logicalAndExpr()
+            for operand in first:
+                self._jump_if_true(operand, true_label)
+            self._jump_if_false(last, label)
+            self._place_label(true_label)
+        elif isinstance(ctx, CompiscriptParser.LogicalAndExprContext):
+            for operand in ctx.equalityExpr():
+                self._jump_if_false(operand, label)
+        elif isinstance(ctx, CompiscriptParser.UnaryExprContext) and ctx.getChild(0).getText() == "!":
+            self._jump_if_true(ctx.unaryExpr(), label)
+        else:
+            condition = self.visit(ctx)
+            self._release(condition)
+            if condition == "false":
+                self._emit(Quad(tac.GOTO, result=label))
+            elif condition != "true":
+                self._emit(Quad(tac.IF_FALSE, condition, result=label))
+
+    def _jump_if_true(self, expr_ctx, label: str):
+        """Salta a `label` si la condicion es verdadera; si es falsa sigue de largo."""
+        ctx = self._unwrap(expr_ctx)
+        if isinstance(ctx, CompiscriptParser.LogicalOrExprContext):
+            for operand in ctx.logicalAndExpr():
+                self._jump_if_true(operand, label)
+        elif isinstance(ctx, CompiscriptParser.LogicalAndExprContext):
+            false_label = self._label()
+            *first, last = ctx.equalityExpr()
+            for operand in first:
+                self._jump_if_false(operand, false_label)
+            self._jump_if_true(last, label)
+            self._place_label(false_label)
+        elif isinstance(ctx, CompiscriptParser.UnaryExprContext) and ctx.getChild(0).getText() == "!":
+            self._jump_if_false(ctx.unaryExpr(), label)
+        else:
+            condition = self.visit(ctx)
+            self._release(condition)
+            if condition == "true":
+                self._emit(Quad(tac.GOTO, result=label))
+            elif condition != "false":
+                self._emit(Quad(tac.IF, condition, result=label))
 
     def visitIfStatement(self, ctx: CompiscriptParser.IfStatementContext):
         blocks = ctx.block()
@@ -365,9 +442,7 @@ class TACGenerator(ParseTreeVisitor):
         self._place_label(start_label)
         self._loop_body(ctx.block(), end_label, condition_label)
         self._place_label(condition_label)
-        condition = self.visit(ctx.expression())
-        self._release(condition)
-        self._emit(Quad(tac.IF, condition, result=start_label))
+        self._jump_if_true(ctx.expression(), start_label)
         self._place_label(end_label)
 
     def visitForStatement(self, ctx: CompiscriptParser.ForStatementContext):
@@ -662,14 +737,12 @@ class TACGenerator(ParseTreeVisitor):
         return self.visit(ctx.conditionalExpr())
 
     def visitTernaryExpr(self, ctx: CompiscriptParser.TernaryExprContext):
-        condition = self.visit(ctx.logicalOrExpr())
         branches = ctx.expression()
         if not branches:
-            return condition
+            return self.visit(ctx.logicalOrExpr())
 
         else_label, end_label = self._label(), self._label()
-        self._release(condition)
-        self._emit(Quad(tac.IF_FALSE, condition, result=else_label))
+        self._jump_if_false(ctx.logicalOrExpr(), else_label)
         result = self._new_temp()
         then_value = self.visit(branches[0])
         self._release(then_value)

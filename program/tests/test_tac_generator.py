@@ -795,7 +795,8 @@ def test_break_of_loop_fully_inside_try_does_not_remove_the_handler():
     """)
 
     assert body.count("try_end") == 1
-    assert body[:5] == ["try_begin L1", "L3:", "ifFalse true goto L4", "goto L4", "L4:"]
+    # while (true) no evalua condicion; el break sale del bucle sin quitar el manejador
+    assert body[:5] == ["try_begin L1", "L3:", "goto L4", "L4:", "try_end"]
 
 
 def test_break_out_of_switch_from_inside_try_removes_the_handler():
@@ -921,3 +922,112 @@ def test_each_error_kind_has_a_single_stub_per_function():
 
 def test_throw_quad_renders():
     assert str(Quad(tac.THROW, '"x"')) == 'throw "x"'
+
+
+# --- condiciones de control de flujo como codigo de saltos ---------------------
+
+def test_if_with_or_jumps_to_body_as_soon_as_one_operand_is_true():
+    body = main_body("""
+        let a: integer = 1;
+        let b: integer = 2;
+        if (a > 0 || b > 0) { print(1); }
+    """)
+
+    assert body[2:] == [
+        "t1 = a > 0",
+        "if t1 goto L2",
+        "t1 = b > 0",
+        "ifFalse t1 goto L1",
+        "L2:",
+        "print 1",
+        "L1:",
+    ]
+
+
+def test_while_with_and_leaves_loop_as_soon_as_one_operand_is_false():
+    body = main_body("""
+        let a: integer = 0;
+        while (a < 10 && a != 5) { a = a + 1; }
+    """)
+
+    assert body[1:6] == ["L1:", "t1 = a < 10", "ifFalse t1 goto L2", "t1 = a != 5", "ifFalse t1 goto L2"]
+
+
+def test_not_swaps_the_jump_without_computing_a_negation():
+    body = main_body("""
+        let a: integer = 0;
+        if (!(a < 3)) { print(a); }
+    """)
+
+    assert body[1:3] == ["t1 = a < 3", "if t1 goto L1"]
+    assert "t1 = !t1" not in body
+
+
+def test_mixed_and_or_with_parentheses():
+    body = main_body("""
+        let a: boolean = true;
+        let b: boolean = false;
+        let c: boolean = true;
+        if ((a || b) && !c) { print(1); }
+    """)
+
+    assert body[3:] == [
+        "if a goto L2",
+        "ifFalse b goto L1",
+        "L2:",
+        "if c goto L1",
+        "print 1",
+        "L1:",
+    ]
+
+
+def test_do_while_condition_with_or_jumps_back_to_start():
+    body = main_body("""
+        let a: integer = 3;
+        do { a = a - 1; } while (a > 1 || a == -5);
+    """)
+
+    assert body[-7:] == [
+        "L2:",
+        "t1 = a > 1",
+        "if t1 goto L1",
+        "t1 = -5",
+        "t1 = a == t1",
+        "if t1 goto L1",
+        "L3:",
+    ]
+
+
+def test_for_condition_with_and_uses_jumps():
+    body = main_body("""
+        let n: integer = 4;
+        for (let i: integer = 0; i < n && i != 2; i = i + 1) { print(i); }
+    """)
+
+    assert body[2:7] == ["L1:", "t1 = i < n", "ifFalse t1 goto L3", "t1 = i != 2", "ifFalse t1 goto L3"]
+
+
+def test_constant_conditions_do_not_emit_tests():
+    body = main_body("while (true) { print(1); } if (false) { print(2); }")
+
+    # while (true): sin prueba; if (false): salto directo al final
+    assert body == ["L1:", "print 1", "goto L1", "L2:", "goto L3", "L3:"]
+
+
+def test_ternary_condition_uses_jumps():
+    body = main_body("""
+        let a: integer = 1;
+        let s: string = a > 0 && a < 5 ? "si" : "no";
+    """)
+
+    assert body[1:6] == ["t1 = a > 0", "ifFalse t1 goto L1", "t1 = a < 5", "ifFalse t1 goto L1", 't1 = "si"']
+
+
+def test_boolean_value_with_or_still_short_circuits_into_a_temporary():
+    body = main_body("""
+        let a: boolean = true;
+        let b: boolean = false;
+        let c: boolean = a || b;
+    """)
+
+    assert body[2:] == ["t1 = a", "if t1 goto L1", "t1 = b", "L1:", "c = t1"]
