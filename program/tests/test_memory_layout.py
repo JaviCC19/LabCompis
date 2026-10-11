@@ -108,10 +108,28 @@ def test_class_layout_places_inherited_fields_first():
     animal: ClassSymbol = analyzer.table.global_scope.resolve("Animal")
     perro: ClassSymbol = analyzer.table.global_scope.resolve("Perro")
 
-    assert [(f.name, f.offset) for f in animal.all_fields()] == [("nombre", 0), ("edad", 8)]
-    assert animal.size == 12
-    assert [(f.name, f.offset) for f in perro.all_fields()] == [("nombre", 0), ("edad", 8), ("raza", 12)]
-    assert perro.size == 20
+    # offset 0: puntero a la vtable
+    assert [(f.name, f.offset) for f in animal.all_fields()] == [("nombre", 8), ("edad", 16)]
+    assert animal.size == 20
+    assert [(f.name, f.offset) for f in perro.all_fields()] == [("nombre", 8), ("edad", 16), ("raza", 20)]
+    assert perro.size == 28
+
+
+def test_vtable_keeps_slot_of_overridden_method():
+    analyzer = analyze("""
+        class Animal {
+            function constructor() {}
+            function hablar(): string { return "..."; }
+            function comer() {}
+        }
+        class Perro : Animal {
+            function hablar(): string { return "guau"; }
+            function correr() {}
+        }
+    """)
+    perro: ClassSymbol = analyzer.table.global_scope.resolve("Perro")
+
+    assert [m.label for m in perro.vtable()] == ["Perro.hablar", "Animal.comer", "Perro.correr"]
 
 
 def test_foreach_and_catch_variables_are_allocated():
