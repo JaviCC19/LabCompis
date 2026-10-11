@@ -558,3 +558,12 @@ def test_try_catch_registers_handler_and_binds_error():
         "print err",
         "L2:",
     ]
+
+
+def test_inherited_field_with_implicit_this_reads_through_this():
+    body = function_body("""
+        class A { let v: integer = 1; }
+        class B : A { function get(): integer { return v + 10; } }
+    """, "B.get")
+
+    assert body == ["t1 = this.v", "t1 = t1 + 10", "return t1"]

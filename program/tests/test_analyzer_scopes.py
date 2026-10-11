@@ -186,3 +186,43 @@ def test_catch_variable_is_visible_inside_catch_block():
     """)
 
     assert analyzer.errors == []
+
+
+def test_inherited_field_and_method_can_be_used_with_implicit_this():
+    analyzer = analyze("""
+        class A {
+          let v: integer = 1;
+          function get(): integer { return v; }
+        }
+        class B : A {
+          function doble(): integer { return v + get(); }
+          function poner(n: integer) { v = n; }
+        }
+        class C : B {
+          function triple(): integer { return v * 3; }
+        }
+    """)
+
+    assert analyzer.errors == []
+
+
+def test_inherited_field_is_not_visible_outside_the_class():
+    analyzer = analyze("""
+        class A { let v: integer = 1; }
+        class B : A { }
+        v = 2;
+    """)
+
+    assert len(analyzer.errors) == 1
+    assert analyzer.errors[0].line == 4
+    assert "no declarada" in messages(analyzer)[0]
+
+
+def test_inherited_constant_field_cannot_be_assigned_with_implicit_this():
+    analyzer = analyze("""
+        class A { const LIMITE: integer = 10; }
+        class B : A { function f() { LIMITE = 3; } }
+    """)
+
+    assert len(analyzer.errors) == 1
+    assert "constante" in messages(analyzer)[0]

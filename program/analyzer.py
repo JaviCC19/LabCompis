@@ -89,6 +89,24 @@ class SemanticAnalyzer(CompiscriptListener):
                 self._error(statements[i + 1], "codigo inalcanzable despues de 'return'/'break'/'continue'")
                 break
 
+    def _resolve_name(self, name: str):
+        """Resuelve un nombre usado sin calificar.
+
+        Recorre los ambitos hacia afuera; al pasar por el ambito de una clase
+        tambien busca los miembros heredados de sus superclases, para que un
+        campo o metodo heredado se pueda usar con `this` implicito.
+        """
+        scope = self.table.current_scope
+        while scope is not None:
+            if name in scope.symbols:
+                return scope.symbols[name]
+            if scope.kind == ScopeKind.CLASS and isinstance(scope.owner, ClassSymbol):
+                member = scope.owner.resolve_member(name)
+                if member is not None:
+                    return member
+            scope = scope.parent
+        return None
+
     def _allocate(self, symbol):
         """Ubica una variable en el registro de activacion de su funcion, o en el segmento global.
 
@@ -237,7 +255,7 @@ class SemanticAnalyzer(CompiscriptListener):
 
         if len(expressions) == 1:
             value_type = self._type(expressions[0])
-            symbol = self.table.resolve(member_name)
+            symbol = self._resolve_name(member_name)
             self.symbol_of[ctx] = symbol
             if symbol is None:
                 self._error(ctx, f"variable '{member_name}' no declarada")
@@ -276,7 +294,7 @@ class SemanticAnalyzer(CompiscriptListener):
 
     def exitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
         text = ctx.Identifier().getText()
-        symbol = self.table.resolve(text)
+        symbol = self._resolve_name(text)
         self.symbol_of[ctx] = symbol
         if symbol is None:
             self._error(ctx, f"variable '{text}' no declarada")
@@ -577,7 +595,7 @@ class SemanticAnalyzer(CompiscriptListener):
         if not suffixes:
             atom = lhs_ctx.primaryAtom()
             if isinstance(atom, CompiscriptParser.IdentifierExprContext):
-                return self.table.resolve(atom.Identifier().getText())
+                return self._resolve_name(atom.Identifier().getText())
             return None
 
         last = suffixes[-1]
