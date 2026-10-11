@@ -38,6 +38,8 @@ class _FunctionContext:
         # el punto actual de la funcion. Un 'return' emite un 'try_end' por
         # cada uno, y un break/continue por cada uno que abandona.
         self.try_depth = 0
+        # mensaje de error -> etiqueta de su stub 'throw' (al final de la funcion)
+        self.error_stubs: dict[str, str] = {}
 
 
 class TACGenerator(ParseTreeVisitor):
@@ -62,6 +64,7 @@ class TACGenerator(ParseTreeVisitor):
         self._stack.append(main)
         begin = self._emit(Quad(tac.FUNC_BEGIN, "main", "0"))
         self.visit(tree)
+        self._emit_error_stubs()
         self._emit(Quad(tac.FUNC_END, "main"))
         main.frame.temp_count = main.temps.max_live
         begin.arg2 = str(main.frame.data_size)
@@ -127,6 +130,50 @@ class TACGenerator(ParseTreeVisitor):
             used.add(name)
             self._names[key] = name
         return self._names[key]
+
+    # --- errores en tiempo de ejecucion -------------------------------------
+
+    INDEX_ERROR = '"indice fuera de rango"'
+
+    def _error_stub(self, message: str) -> str:
+        """Etiqueta del stub que lanza `message`; se crea la primera vez que se pide."""
+        stubs = self._current.error_stubs
+        if message not in stubs:
+            stubs[message] = self._label()
+        return stubs[message]
+
+    def _emit_error_stubs(self):
+        """Al final de la funcion: un 'throw' por cada tipo de error que la funcion puede lanzar.
+
+        'throw' transfiere el control al manejador activo en tiempo de
+        ejecucion (el ultimo try_begin sin try_end), asi que el stub sirve
+        para cualquier acceso de la funcion, este o no dentro de un try.
+        """
+        stubs = self._current.error_stubs
+        if not stubs:
+            return
+        code = self._current.code.code
+        if code and code[-1].op not in self._UNCONDITIONAL:
+            self._emit(Quad(tac.RETURN))  # el flujo normal no debe caer en los stubs
+        for message, label in stubs.items():
+            self._place_label(label)
+            self._emit(Quad(tac.THROW, message))
+
+    @staticmethod
+    def _is_int_literal(operand: str) -> bool:
+        return isinstance(operand, str) and operand.isdigit()
+
+    def _check_bounds(self, array: str, index: str):
+        """Verificacion explicita de 0 <= index < len array antes de un acceso."""
+        error = self._error_stub(self.INDEX_ERROR)
+        test = self._new_temp()
+        if not self._is_int_literal(index):
+            self._emit(Quad(tac.BINARY, index, "0", test, operator="<"))
+            self._emit(Quad(tac.IF, test, result=error))
+        self._emit(Quad(tac.LENGTH, array, result=test))
+        self._emit(Quad(tac.BINARY, index, test, test, operator=">="))
+        self._emit(Quad(tac.IF, test, result=error))
+        self._release(test)
 
     def _binary(self, operator: str, left: str, right: str) -> str:
         self._release(left, right)
@@ -370,6 +417,7 @@ class TACGenerator(ParseTreeVisitor):
         emit_body()
         if not function.code.code or function.code.code[-1].op != tac.RETURN:
             self._emit(Quad(tac.RETURN))
+        self._emit_error_stubs()
         self._emit(Quad(tac.FUNC_END, label))
 
         frame.temp_count = function.temps.max_live
@@ -733,6 +781,7 @@ class TACGenerator(ParseTreeVisitor):
     def _apply_suffix(self, current: str, suffix) -> str:
         if isinstance(suffix, CompiscriptParser.IndexExprContext):
             index = self.visit(suffix.expression())
+            self._check_bounds(current, index)
             self._release(current, index)
             result = self._new_temp()
             self._emit(Quad(tac.LOAD_INDEX, current, index, result))
@@ -773,6 +822,7 @@ class TACGenerator(ParseTreeVisitor):
         if isinstance(last, CompiscriptParser.IndexExprContext):
             index = self.visit(last.expression())
             value = self.visit(ctx.assignmentExpr())
+            self._check_bounds(base, index)
             self._emit(Quad(tac.STORE_INDEX, index, value, base))
             self._release(base, index)
         else:

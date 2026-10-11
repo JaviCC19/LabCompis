@@ -5,6 +5,7 @@ from CompiscriptParser import CompiscriptParser
 from analyzer import SemanticAnalyzer
 from tac_generator import TACGenerator
 from ir import tac
+from ir.tac import Quad
 
 
 def generate(source: str):
@@ -509,7 +510,27 @@ def test_index_read_and_write():
         a[i + 1] = a[i] * 2;
     """)
 
-    assert body[-4:] == ["t1 = i + 1", "t2 = a[i]", "t2 = t2 * 2", "a[t1] = t2"]
+    assert body[5:] == [
+        "t1 = i + 1",
+        # lectura a[i]: 0 <= i < len a
+        "t2 = i < 0",
+        "if t2 goto L1",
+        "t2 = len a",
+        "t2 = i >= t2",
+        "if t2 goto L1",
+        "t2 = a[i]",
+        "t2 = t2 * 2",
+        # escritura a[i + 1]
+        "t3 = t1 < 0",
+        "if t3 goto L1",
+        "t3 = len a",
+        "t3 = t1 >= t3",
+        "if t3 goto L1",
+        "a[t1] = t2",
+        "return",
+        "L1:",
+        'throw "indice fuera de rango"',
+    ]
 
 
 def test_nested_array_access():
@@ -518,7 +539,21 @@ def test_nested_array_access():
         print(m[1][0]);
     """)
 
-    assert body[-3:] == ["t1 = m[1]", "t1 = t1[0]", "print t1"]
+    # con indice literal no negativo solo se verifica el limite superior
+    assert body[-12:] == [
+        "t1 = len m",
+        "t1 = 1 >= t1",
+        "if t1 goto L1",
+        "t1 = m[1]",
+        "t2 = len t1",
+        "t2 = 0 >= t2",
+        "if t2 goto L1",
+        "t1 = t1[0]",
+        "print t1",
+        "return",
+        "L1:",
+        'throw "indice fuera de rango"',
+    ]
 
 
 def test_foreach_iterates_by_index_up_to_length():
@@ -550,6 +585,9 @@ def test_try_catch_registers_handler_and_binds_error():
 
     assert body[3:] == [
         "try_begin L1",
+        "t1 = len a",
+        "t1 = 5 >= t1",
+        "if t1 goto L3",  # fuera de rango: el stub lanza el error al manejador activo (L1)
         "t1 = a[5]",
         "print t1",
         "try_end",
@@ -558,6 +596,9 @@ def test_try_catch_registers_handler_and_binds_error():
         "err = catch",
         "print err",
         "L2:",
+        "return",
+        "L3:",
+        'throw "indice fuera de rango"',
     ]
 
 
@@ -778,3 +819,59 @@ def test_void_return_inside_try_also_removes_handler():
     assert function_body("""
         function f() { try { return; } catch (e) { print(e); } }
     """, "f")[:3] == ["try_begin L1", "try_end", "return"]
+
+
+# --- chequeos explicitos en tiempo de ejecucion y throw -----------------------
+
+def test_out_of_range_access_inside_function_throws_to_active_handler():
+    body = function_body("""
+        function leer(a: integer[], i: integer): integer {
+          try { return a[i]; } catch (e) { return -1; }
+        }
+    """, "leer")
+
+    assert body[:8] == [
+        "try_begin L1",
+        "t1 = i < 0",
+        "if t1 goto L3",
+        "t1 = len a",
+        "t1 = i >= t1",
+        "if t1 goto L3",
+        "t1 = a[i]",
+        "try_end",
+    ]
+    # el stub queda despues del ultimo return, fuera del flujo normal
+    assert body[-2:] == ["L3:", 'throw "indice fuera de rango"']
+
+
+def test_function_without_array_access_has_no_error_stub():
+    assert "throw" not in "\n".join(lines("function f(x: integer): integer { return x + 1; }"))
+
+
+def test_foreach_and_array_literal_do_not_need_bounds_checks():
+    result = lines("""
+        let a: integer[] = [1, 2, 3];
+        foreach (x in a) { print(x); }
+    """)
+
+    assert not any(l.startswith("throw") or " >= " in l for l in result)
+
+
+def test_matrix_write_checks_both_dimensions():
+    body = main_body("""
+        let m: integer[][] = [[1, 2], [3, 4]];
+        let i: integer = 1;
+        let j: integer = 0;
+        m[i][j] = 9;
+    """)
+    store = body.index("t1[j] = 9")
+
+    assert body[store - 11:store] == [
+        "t1 = i < 0", "if t1 goto L1", "t1 = len m", "t1 = i >= t1", "if t1 goto L1",
+        "t1 = m[i]",
+        "t2 = j < 0", "if t2 goto L1", "t2 = len t1", "t2 = j >= t2", "if t2 goto L1",
+    ]
+
+
+def test_throw_quad_renders():
+    assert str(Quad(tac.THROW, '"x"')) == 'throw "x"'
