@@ -59,6 +59,9 @@ class SemanticAnalyzer(CompiscriptListener):
         self._decl_symbols = {}  # ctx de declaracion -> simbolo, mientras se visita su inicializador
 
         self.globals = MemoryArea("global", "global")  # segmento de datos de las variables globales
+        # Registro de activacion de `main` (sentencias de nivel superior). Sus
+        # variables viven en el segmento global, asi que solo guarda temporales.
+        self.main_frame = ActivationRecord("main", level=1)
         self.functions: list[FunctionSymbol] = []  # todas las funciones y metodos, en orden de declaracion
 
     # ------------------------------------------------------------------
@@ -747,7 +750,13 @@ class SemanticAnalyzer(CompiscriptListener):
             symbol.label = f"{self.function_stack[-1].label}.{symbol.name}"
         elif symbol.owner_class is not None:
             symbol.label = f"{symbol.owner_class.name}.{symbol.name}"
-        symbol.frame = ActivationRecord(symbol.label)
+        enclosing = self.function_stack[-1].frame if self.function_stack else None
+        symbol.level = len(self.function_stack)
+        if self.function_stack:
+            symbol.area = self.function_stack[-1].label
+        else:
+            symbol.area = symbol.owner_class.name if symbol.owner_class is not None else "global"
+        symbol.frame = ActivationRecord(symbol.label, level=symbol.level + 1, enclosing=enclosing)
         self.symbol_of[ctx] = symbol
         self.functions.append(symbol)
         if symbol.owner_class is not None:

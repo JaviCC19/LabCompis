@@ -47,5 +47,6 @@ def test_memory_report_lists_globals_classes_and_frames():
     assert "global g            integer      offset=0    size=4" in report
     assert "== clase A (12 bytes por instancia)" in report
     assert "vtable: [0] A.get" in report
-    assert "== registro de activacion de f (8 bytes de variables + 1 temporales = 16 bytes)" in report
+    assert "== registro de activacion de f (nivel 1)" in report
+    assert "params=4 + locales=4 + temporales=1x8 = 16 bytes (begin_func) + 24 de cabecera = 40 bytes" in report
     assert "local  r            integer      offset=4    size=4" in report

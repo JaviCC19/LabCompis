@@ -130,7 +130,7 @@ def tac(ls: LanguageServer, params):
     result = compile_source(ls.workspace.get_text_document(uri).source)
     if result.errors:
         return {"errors": result.errors}
-    return {"tac": str(result.tac), "symbols": describe_memory(result.analyzer)}
+    return {"tac": str(result.tac), "symbols": describe_memory(result.analyzer, result.init_frames)}
 
 
 if __name__ == "__main__":

@@ -24,9 +24,10 @@ from semantic import FunctionSymbol, ClassSymbol, FunctionType, ActivationRecord
 class _FunctionContext:
     """Estado de generacion de la funcion en curso (o de `main`)."""
 
-    def __init__(self, label: str, symbol: FunctionSymbol = None):
+    def __init__(self, label: str, symbol: FunctionSymbol = None, frame: ActivationRecord = None):
         self.label = label
         self.symbol = symbol
+        self.frame = frame
         self.code = TACProgram()
         self.temps = TempAllocator()
         # (etiqueta de break, etiqueta de continue) de los bucles/switch abiertos;
@@ -44,6 +45,7 @@ class TACGenerator(ParseTreeVisitor):
         self._used_names = {}  # etiqueta de funcion / 'global' -> nombres ya usados
         self.classes = [s for s in analyzer.table.global_scope.symbols.values() if isinstance(s, ClassSymbol)]
         self._class_init = {}  # ClassSymbol -> etiqueta de su inicializador de campos (o None)
+        self.init_frames: list[ActivationRecord] = []  # registros de los inicializadores Clase.__init
 
     # ------------------------------------------------------------------
     # punto de entrada
@@ -51,11 +53,13 @@ class TACGenerator(ParseTreeVisitor):
 
     def generate(self, tree) -> TACProgram:
         main = _FunctionContext("main")
+        main.frame = self.analyzer.main_frame
         self._stack.append(main)
         begin = self._emit(Quad(tac.FUNC_BEGIN, "main", "0"))
         self.visit(tree)
         self._emit(Quad(tac.FUNC_END, "main"))
-        begin.arg2 = str(main.temps.max_live * 8)
+        main.frame.temp_count = main.temps.max_live
+        begin.arg2 = str(main.frame.data_size)
         self._stack.pop()
 
         program = TACProgram()
@@ -293,7 +297,7 @@ class TACGenerator(ParseTreeVisitor):
     # ------------------------------------------------------------------
 
     def _generate_function(self, label: str, frame: ActivationRecord, emit_body, symbol=None):
-        function = _FunctionContext(label, symbol)
+        function = _FunctionContext(label, symbol, frame)
         self._stack.append(function)
 
         begin = self._emit(Quad(tac.FUNC_BEGIN, label, "0"))
@@ -303,7 +307,7 @@ class TACGenerator(ParseTreeVisitor):
         self._emit(Quad(tac.FUNC_END, label))
 
         frame.temp_count = function.temps.max_live
-        begin.arg2 = str(frame.total_size)
+        begin.arg2 = str(frame.data_size)
         self._stack.pop()
         self.functions.append(function)
 
@@ -362,7 +366,8 @@ class TACGenerator(ParseTreeVisitor):
 
         label = f"{class_symbol.name}.__init"
         self._class_init[class_symbol] = label
-        frame = ActivationRecord(label)
+        frame = ActivationRecord(label, level=1)
+        self.init_frames.append(frame)
         frame.allocate(ThisSlot(class_symbol.type), "param")
 
         def body():

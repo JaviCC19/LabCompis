@@ -1,4 +1,5 @@
-from semantic import VariableSymbol, ClassSymbol, MemoryArea, INTEGER, FLOAT, STRING, BOOLEAN, size_of
+from compiler import compile_source, describe_memory
+from semantic import VariableSymbol, ClassSymbol, MemoryArea, INTEGER, FLOAT, STRING, BOOLEAN, size_of, HEADER_SIZE
 from tests.test_analyzer_types import analyze
 
 
@@ -142,3 +143,108 @@ def test_foreach_and_catch_variables_are_allocated():
     names = [s.name for s in analyzer.table.global_scope.resolve("f").frame.locals]
 
     assert names == ["n", "e"]
+
+
+# --- nivel de anidamiento, etiqueta del area y direccion de cada simbolo ------
+
+def test_each_symbol_exposes_storage_offset_size_level_area_and_address():
+    analyzer = analyze("""
+        let g: integer = 0;
+        class A { let v: integer; function set(n: integer) { this.v = n; } }
+        function f(p: integer): integer { let x: integer = p; return x; }
+    """)
+    scope = analyzer.table.global_scope
+    g = scope.resolve("g")
+    f = scope.resolve("f")
+    p, x = f.frame.symbols
+    a = scope.resolve("A")
+    v = a.fields["v"]
+    this, n = a.methods["set"].frame.symbols
+
+    assert (g.storage, g.offset, g.size, g.level, g.area, g.address) == ("global", 0, 4, 0, "global", "gp[+0]")
+    assert (p.storage, p.level, p.area, p.address) == ("param", 1, "f", "fp[+0]")
+    assert (x.storage, x.level, x.area, x.address) == ("local", 1, "f", "fp[+4]")
+    assert (v.storage, v.area, v.address) == ("field", "A", "this[+8]")
+    assert (this.address, n.address) == ("fp[+0]", "fp[+8]")
+    assert (f.level, f.area, f.label) == (0, "global", "f")
+
+
+def test_symbol_without_address_reports_none():
+    symbol = VariableSymbol("suelto", INTEGER)
+
+    assert symbol.address is None
+    assert symbol.level is None
+
+
+def test_nested_function_frame_has_level_and_access_link_to_enclosing_frame():
+    analyzer = analyze("""
+        function externa(): integer {
+            let x: integer = 1;
+            function media(): integer {
+                function interna(): integer { return x; }
+                return interna();
+            }
+            return media();
+        }
+    """)
+    externa, media, interna = analyzer.functions
+
+    assert [fn.frame.level for fn in (externa, media, interna)] == [1, 2, 3]
+    assert externa.frame.enclosing is None
+    assert media.frame.enclosing is externa.frame
+    assert interna.frame.enclosing is media.frame
+    assert (media.level, media.area) == (1, "externa")
+
+
+def test_frame_sizes_split_params_locals_temps_and_header():
+    result = compile_source("""
+        function f(a: integer, b: float): integer {
+            let r: integer = a * 2 + a * 3;
+            return r;
+        }
+    """)
+    frame = result.analyzer.functions[0].frame
+
+    assert (frame.params_size, frame.locals_size, frame.temp_count) == (12, 4, 2)
+    assert frame.data_size == 16 + 2 * 8
+    assert frame.total_size == HEADER_SIZE + frame.data_size
+    assert frame.temp_offset(1) == 16 and frame.temp_offset(2) == 24
+    assert f"begin_func f, {frame.data_size}" in str(result.tac)
+
+
+def test_main_frame_holds_only_temporaries_and_globals_live_in_gp():
+    result = compile_source("""
+        let a: integer = 1;
+        let b: integer = (a + 1) * (a + 2);
+        { let c: integer = b; }
+    """)
+    analyzer = result.analyzer
+
+    assert analyzer.main_frame.symbols == []
+    assert analyzer.main_frame.temp_count == 2
+    assert str(result.tac).splitlines()[0] == "begin_func main, 16"
+    assert [s.address for s in analyzer.globals.symbols] == ["gp[+0]", "gp[+4]", "gp[+8]"]
+
+
+def test_memory_report_shows_main_frame_header_and_temporaries():
+    result = compile_source("let a: integer = 1 + 2;")
+    report = describe_memory(result.analyzer, result.init_frames)
+
+    assert "== registro de activacion de main (nivel 1)" in report
+    assert "cabecera fp[-16] enlace de control: fp del llamador" in report
+    assert "temp   t1           temporal     offset=0    size=8  nivel=1  dir=fp[+0]" in report
+
+
+def test_class_init_frame_is_reported():
+    result = compile_source("class A { let v: integer = 3; } let a: A = new A();")
+    report = describe_memory(result.analyzer, result.init_frames)
+
+    assert "== registro de activacion de A.__init (nivel 1)" in report
+    assert "field  v            integer      offset=8    size=4   dir=this[+8]  (de A)" in report
+
+
+def test_semantic_error_leaves_no_tac_and_reports_line_and_column():
+    result = compile_source("function f(): integer {\n  let x: integer = 1;\n  return y;\n}")
+
+    assert result.tac is None
+    assert result.errors == ["Error semantico (linea 3:9): variable 'y' no declarada"]

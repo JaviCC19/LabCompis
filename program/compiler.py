@@ -33,6 +33,7 @@ class CompileResult:
     syntax_errors: list = field(default_factory=list)
     analyzer: SemanticAnalyzer = None
     tac: object = None  # TACProgram, solo si no hubo errores
+    init_frames: list = field(default_factory=list)  # registros de Clase.__init (los crea el generador)
 
     @property
     def errors(self) -> list[str]:
@@ -61,30 +62,35 @@ def compile_source(source: str) -> CompileResult:
     if analyzer.errors:
         return result
 
-    result.tac = TACGenerator(analyzer).generate(tree)
+    generator = TACGenerator(analyzer)
+    result.tac = generator.generate(tree)
+    result.init_frames = generator.init_frames
     return result
 
 
-def describe_memory(analyzer: SemanticAnalyzer) -> str:
-    """Tabla de simbolos con sus direcciones: segmento global, layout de clases y registros de activacion."""
-    out = [f"== segmento global ({analyzer.globals.size} bytes)"]
+def describe_memory(analyzer: SemanticAnalyzer, extra_frames=()) -> str:
+    """Tabla de simbolos con sus direcciones: segmento global, layout de clases y registros de activacion.
+
+    `extra_frames` agrega registros que no vienen del fuente (los `Clase.__init`
+    que crea el generador de TAC, ver `CompileResult.init_frames`).
+    """
+    out = [f"== segmento global gp ({analyzer.globals.size} bytes, nivel 0)"]
     out += analyzer.globals.describe()
 
     for symbol in analyzer.table.global_scope.symbols.values():
         if isinstance(symbol, ClassSymbol):
             out.append(f"== clase {symbol.name} ({symbol.size} bytes por instancia)")
-            out.append(f"  field  {'vtable':<12} {'puntero':<12} offset=0    size=8")
+            out.append(f"  field  {'vtable':<12} {'puntero':<12} offset=0    size=8   dir=this[+0]")
             for f in symbol.all_fields():
                 type_name = f.type.name if f.type is not None else "?"
-                out.append(f"  field  {f.name:<12} {type_name:<12} offset={f.offset:<4} size={f.size}")
+                out.append(
+                    f"  field  {f.name:<12} {type_name:<12} offset={f.offset:<4} size={f.size:<2}  "
+                    f"dir={f.address}  (de {f.area})"
+                )
             vtable = ", ".join(f"[{i}] {m.label}" for i, m in enumerate(symbol.vtable()))
             out.append(f"  vtable: {vtable or '(vacia)'}")
 
-    for function in analyzer.functions:
-        frame = function.frame
-        out.append(
-            f"== registro de activacion de {function.label} "
-            f"({frame.size} bytes de variables + {frame.temp_count} temporales = {frame.total_size} bytes)"
-        )
+    for frame in [f.frame for f in analyzer.functions] + list(extra_frames) + [analyzer.main_frame]:
+        out.append(f"== registro de activacion de {frame.name} (nivel {frame.level})")
         out += frame.describe()
     return "\n".join(out)

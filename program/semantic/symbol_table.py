@@ -9,7 +9,7 @@ excepciones que aqui se definen.
 from enum import Enum, auto
 
 from .types_system import FunctionType, ClassType, Type
-from .runtime import size_of, POINTER
+from .runtime import size_of, address_of, POINTER
 
 
 class ScopeKind(Enum):
@@ -28,6 +28,16 @@ class Symbol:
         self.storage = None
         self.offset = None
         self.size = None
+        # Nivel de anidamiento del area que lo declara (0 = global, 1 = main /
+        # funcion de nivel superior / metodo, ...) y etiqueta de esa area
+        # ('global', la etiqueta de la funcion o el nombre de la clase).
+        self.level = None
+        self.area = None
+
+    @property
+    def address(self):
+        """Direccion relativa a su registro base (gp, fp o this), p.ej. 'fp[+8]'."""
+        return address_of(self)
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.name}: {self.type})"
@@ -77,6 +87,7 @@ class ClassSymbol(Symbol):
         offset = self.superclass.size if self.superclass is not None else POINTER
         for field in self.fields.values():
             field.storage = "field"
+            field.area = self.name
             field.offset = offset
             field.size = size_of(field.type)
             offset += field.size

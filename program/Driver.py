@@ -25,7 +25,7 @@ def main(path: str, tree_output: str = None, tac_output: str = None, show_symbol
         return 1
 
     if show_symbols:
-        print(describe_memory(result.analyzer))
+        print(describe_memory(result.analyzer, result.init_frames))
 
     if tac_output == "-":
         print(result.tac)
