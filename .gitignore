@@ -22,3 +22,6 @@ vscode-extension/*.vsix
 # OS / editor
 .vscode/
 .DS_Store
+
+# Configuracion local del asistente
+.claude/
