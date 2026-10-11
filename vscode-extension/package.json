@@ -10,6 +10,9 @@
   "categories": ["Programming Languages", "Linters"],
   "activationEvents": ["onLanguage:compiscript"],
   "main": "./src/extension.js",
+  "scripts": {
+    "compile": "node --check src/extension.js && node --check src/parseTreePanel.js"
+  },
   "contributes": {
     "languages": [
       {
