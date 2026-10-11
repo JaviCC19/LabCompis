@@ -1,22 +1,28 @@
-# Compiscript — Análisis Semántico
+# Compiscript — Análisis Semántico y Generación de Código Intermedio
 
-Implementación del analizador léxico, sintáctico y semántico de Compiscript
-(fase de Análisis Semántico) usando ANTLR4 con target Python3.
+Implementación del compilador de Compiscript con ANTLR4 y target Python3.
+Cubre el análisis léxico, sintáctico y semántico, y la generación de
+código intermedio (TAC).
 
 # Link al video:
 https://drive.google.com/drive/folders/1oJakUhT_LeHLsataZ9m95zVwSX6Z9hN2?usp=sharing
 
 
 Ver [Instrucciones.md](Instrucciones.md) para el enunciado completo de la tarea
-y [ARCHITECTURE.md](ARCHITECTURE.md) para el detalle de la arquitectura.
+y [ARCHITECTURE.md](ARCHITECTURE.md) para el detalle de la arquitectura, y
+[TAC.md](TAC.md) para la documentación del código intermedio.
 
 ## Estructura del repositorio
 
 ```
 program/
   Compiscript.g4        Gramática ANTLR (lexer + parser)
-  Driver.py              Punto de entrada CLI: parsea un archivo .cps, corre el analisis semantico
-                          y opcionalmente exporta el arbol sintactico (--tree)
+  Driver.py              Punto de entrada CLI: compila un .cps, reporta errores y opcionalmente
+                          exporta el arbol (--tree), el TAC (--tac) y la tabla de simbolos (--symbols)
+  compiler.py            Pipeline: parser -> analisis semantico -> generacion de TAC
+  analyzer.py            Analisis semantico (Listener) + asignacion de direcciones
+  tac_generator.py       Generacion de codigo de tres direcciones (Visitor)
+  ir/                     Representacion intermedia: cuadruplos, temporales y etiquetas
   lsp_server.py           Servidor LSP (pygls) que expone el analizador a un editor
   tree_export.py          Arbol de ANTLR -> dict JSON / grafo Graphviz DOT
   program.cps            Programa de ejemplo usado para pruebas manuales
@@ -57,7 +63,16 @@ El proyecto se construye y ejecuta dentro de un contenedor Docker que trae Java
    python3 Driver.py program.cps
    ```
 
-5. Correr la batería de tests:
+5. Generar el código intermedio (TAC) y ver la tabla de símbolos con
+   direcciones y registros de activación:
+
+   ```bash
+   python3 Driver.py program.cps --tac              # a stdout
+   python3 Driver.py program.cps --tac salida.tac   # a un archivo
+   python3 Driver.py program.cps --symbols
+   ```
+
+6. Correr la batería de tests:
 
    ```bash
    pytest
@@ -144,3 +159,16 @@ reinicia el proceso del servidor sin cerrar VS Code.
       panel de VS Code).
 - [x] Editor: extensión de VS Code con LSP en vez de un IDE propio.
 - [x] Documentación de arquitectura (`ARCHITECTURE.md`).
+
+### Fase de generación de código intermedio
+
+- [x] Diseño del TAC en cuádruplos (`ir/tac.py`, documentado en `TAC.md`).
+- [x] Tabla de símbolos con direcciones, tamaños, registros de activación,
+      layout de objetos y vtables.
+- [x] Asignación y reciclaje de temporales.
+- [x] Generación de TAC: expresiones (con cortocircuito), asignaciones, control
+      de flujo, `switch`, funciones y recursión, clases/objetos con despacho
+      dinámico, arreglos, `foreach`, `try/catch`.
+- [x] `--tac` y `--symbols` en `Driver.py`.
+- [x] Tests del TAC (`tests/test_tac*.py`, `tests/test_memory_layout.py`, `tests/test_compiler.py`).
+- [ ] Mostrar el TAC desde la extensión de VS Code.
