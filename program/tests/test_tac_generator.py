@@ -684,3 +684,97 @@ def test_top_level_functions_and_globals_do_not_use_access_link():
     """)
 
     assert not any("access_link" in l or l.startswith("link") for l in result)
+
+
+# --- try_end en todos los caminos de salida -----------------------------------
+
+def test_return_inside_try_removes_the_handler_first():
+    body = function_body("""
+        function f(n: integer): integer {
+          try { return n * 2; } catch (e) { print(e); }
+          return 0;
+        }
+    """, "f")
+
+    assert body[:4] == ["try_begin L1", "t1 = n * 2", "try_end", "return t1"]
+    # el final normal del try es inalcanzable (termina en return): no se emite
+    assert body[4] == "L1:"
+
+
+def test_return_inside_nested_try_removes_every_open_handler():
+    body = function_body("""
+        function f(): integer {
+          try {
+            try { return 1; } catch (a) { print(a); }
+          } catch (b) { print(b); }
+          return 0;
+        }
+    """, "f")
+
+    assert body[:5] == ["try_begin L1", "try_begin L3", "try_end", "try_end", "return 1"]
+
+
+def test_return_inside_catch_only_closes_the_enclosing_try():
+    body = function_body("""
+        function f(): integer {
+          try {
+            try { print(1); } catch (a) { return 2; }
+          } catch (b) { print(b); }
+          return 0;
+        }
+    """, "f")
+    catch_start = body.index("a = catch")
+
+    assert body[catch_start + 1:catch_start + 3] == ["try_end", "return 2"]
+
+
+def test_break_and_continue_inside_try_remove_the_handler():
+    body = main_body("""
+        let i: integer = 0;
+        while (i < 10) {
+          try {
+            i = i + 1;
+            if (i == 2) { continue; }
+            if (i == 5) { break; }
+          } catch (e) { print(e); }
+        }
+    """)
+    cont = body.index("goto L1")
+    brk = body.index("goto L2")
+
+    assert body[cont - 1] == "try_end"
+    assert body[brk - 1] == "try_end"
+
+
+def test_break_of_loop_fully_inside_try_does_not_remove_the_handler():
+    body = main_body("""
+        try {
+          while (true) { break; }
+        } catch (e) { print(e); }
+    """)
+
+    assert body.count("try_end") == 1
+    assert body[:5] == ["try_begin L1", "L3:", "ifFalse true goto L4", "goto L4", "L4:"]
+
+
+def test_break_out_of_switch_from_inside_try_removes_the_handler():
+    body = main_body("""
+        let x: integer = 1;
+        switch (x) {
+          case 1:
+            try { break; } catch (e) { print(e); }
+          default:
+            print(0);
+        }
+    """)
+    start = next(i for i, l in enumerate(body) if l.startswith("try_begin"))
+
+    # break sale del switch (L3) quitando antes el manejador del try
+    assert body[start + 1:start + 3] == ["try_end", "goto L3"]
+    assert body[-1] == "L3:"
+
+
+def test_void_return_inside_try_also_removes_handler():
+    assert function_body("""
+        function f() { try { return; } catch (e) { print(e); } }
+    """, "f")[:3] == ["try_begin L1", "try_end", "return"]

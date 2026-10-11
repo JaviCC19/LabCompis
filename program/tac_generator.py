@@ -30,9 +30,14 @@ class _FunctionContext:
         self.frame = frame
         self.code = TACProgram()
         self.temps = TempAllocator()
-        # (etiqueta de break, etiqueta de continue) de los bucles/switch abiertos;
-        # un switch no tiene continue (None), asi que 'continue' busca el bucle mas cercano.
-        self.jumps: list[tuple[str, str]] = []
+        # (etiqueta de break, etiqueta de continue, try abiertos al entrar) de los
+        # bucles/switch abiertos; un switch no tiene continue (None), asi que
+        # 'continue' busca el bucle mas cercano.
+        self.jumps: list[tuple[str, str, int]] = []
+        # Cantidad de bloques 'try' abiertos (su manejador sigue registrado) en
+        # el punto actual de la funcion. Un 'return' emite un 'try_end' por
+        # cada uno, y un break/continue por cada uno que abandona.
+        self.try_depth = 0
 
 
 class TACGenerator(ParseTreeVisitor):
@@ -76,13 +81,21 @@ class TACGenerator(ParseTreeVisitor):
     def _current(self) -> _FunctionContext:
         return self._stack[-1]
 
+    _UNCONDITIONAL = (tac.GOTO, tac.RETURN, tac.THROW)
+
     def _emit(self, quad: Quad) -> Quad:
         code = self._current.code.code
-        # Un 'goto' justo despues de otro salto incondicional nunca se ejecuta
-        # (p.ej. el 'goto fin' de un if cuyo bloque termina en 'break').
-        if quad.op == tac.GOTO and code and code[-1].op in (tac.GOTO, tac.RETURN):
+        # Lo que sigue a un salto incondicional (goto, return, throw) sin una
+        # etiqueta de por medio nunca se ejecuta: p.ej. el 'goto fin' de un if
+        # cuyo bloque termina en 'break', o el 'try_end' tras un 'return'.
+        if code and code[-1].op in self._UNCONDITIONAL and quad.op not in (tac.LABEL, tac.FUNC_END):
             return quad
         return self._current.code.emit(quad)
+
+    def _leave_try_blocks(self, down_to: int):
+        """Emite un 'try_end' por cada 'try' abierto por encima de `down_to`."""
+        for _ in range(self._current.try_depth - down_to):
+            self._emit(Quad(tac.TRY_END))
 
     def _new_temp(self) -> str:
         return self._current.temps.new()
@@ -259,7 +272,7 @@ class TACGenerator(ParseTreeVisitor):
         self._place_label(end_label)
 
     def _loop_body(self, block, break_label: str, continue_label: str):
-        self._current.jumps.append((break_label, continue_label))
+        self._current.jumps.append((break_label, continue_label, self._current.try_depth))
         self.visit(block)
         self._current.jumps.pop()
 
@@ -302,10 +315,13 @@ class TACGenerator(ParseTreeVisitor):
         self._place_label(end_label)
 
     def visitBreakStatement(self, ctx: CompiscriptParser.BreakStatementContext):
-        self._emit(Quad(tac.GOTO, result=self._current.jumps[-1][0]))
+        target, _, depth = self._current.jumps[-1]
+        self._leave_try_blocks(depth)
+        self._emit(Quad(tac.GOTO, result=target))
 
     def visitContinueStatement(self, ctx: CompiscriptParser.ContinueStatementContext):
-        target = next(cont for _, cont in reversed(self._current.jumps) if cont is not None)
+        target, depth = next((cont, d) for _, cont, d in reversed(self._current.jumps) if cont is not None)
+        self._leave_try_blocks(depth)
         self._emit(Quad(tac.GOTO, result=target))
 
     def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):
@@ -330,7 +346,7 @@ class TACGenerator(ParseTreeVisitor):
         self._release(value)
         self._emit(Quad(tac.GOTO, result=default_label or end_label))
 
-        self._current.jumps.append((end_label, None))
+        self._current.jumps.append((end_label, None, self._current.try_depth))
         for case, label in zip(cases, case_labels):
             self._place_label(label)
             for statement in case.statement():
@@ -372,11 +388,11 @@ class TACGenerator(ParseTreeVisitor):
         self._generate_function(symbol.label, symbol.frame, body, symbol)
 
     def visitReturnStatement(self, ctx: CompiscriptParser.ReturnStatementContext):
-        if ctx.expression() is None:
-            self._emit(Quad(tac.RETURN))
-            return
-        value = self.visit(ctx.expression())
+        # El valor se evalua con los manejadores aun activos (puede fallar dentro
+        # del try); luego se cierran todos los 'try' abiertos de la funcion.
+        value = self.visit(ctx.expression()) if ctx.expression() is not None else None
         self._release(value)
+        self._leave_try_blocks(0)
         self._emit(Quad(tac.RETURN, value))
 
     # ------------------------------------------------------------------
@@ -511,10 +527,18 @@ class TACGenerator(ParseTreeVisitor):
         self._release(array, index, length)
 
     def visitTryCatchStatement(self, ctx: CompiscriptParser.TryCatchStatementContext):
-        """try_begin registra el manejador; un error en tiempo de ejecucion salta a su etiqueta."""
+        """try_begin registra el manejador; un error en tiempo de ejecucion salta a su etiqueta.
+
+        Toda salida del bloque try quita el manejador con 'try_end': el final
+        normal del bloque, y cualquier return/break/continue que lo abandone.
+        Al saltar al catch el manejador ya fue quitado por el runtime, asi
+        que el cuerpo del catch no cuenta como dentro del try.
+        """
         catch_label, end_label = self._label(), self._label()
         self._emit(Quad(tac.TRY_BEGIN, result=catch_label))
+        self._current.try_depth += 1
         self.visit(ctx.block(0))
+        self._current.try_depth -= 1
         self._emit(Quad(tac.TRY_END))
         self._emit(Quad(tac.GOTO, result=end_label))
         self._place_label(catch_label)

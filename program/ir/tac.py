@@ -42,6 +42,7 @@ ACCESS_LINK = "access_link"  # result = access_link arg1(saltos): fp del registr
 LOAD_OUTER = "load_outer"    # result = arg1->arg2   (variable arg2 del registro al que apunta arg1)
 STORE_OUTER = "store_outer"  # result->arg1 = arg2
 LINK = "link"                # link arg1: enlace de acceso para la proxima llamada
+THROW = "throw"              # throw arg1: lanza un error hacia el manejador activo
 
 
 @dataclass
@@ -108,6 +109,8 @@ class Quad:
             return f"{self.result}->{self.arg1} = {self.arg2}"
         if op == LINK:
             return f"link {self.arg1}"
+        if op == THROW:
+            return f"throw {self.arg1}"
         raise ValueError(f"operacion TAC desconocida: {op}")
 
     def as_row(self):
