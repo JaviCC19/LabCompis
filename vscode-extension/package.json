@@ -1,7 +1,7 @@
 {
   "name": "compiscript-lsp",
   "displayName": "Compiscript",
-  "description": "Resaltado de sintaxis, diagnosticos semanticos en vivo y arbol sintactico visual para Compiscript.",
+  "description": "Resaltado de sintaxis, diagnosticos semanticos en vivo, arbol sintactico visual y codigo intermedio (TAC) para Compiscript.",
   "version": "0.1.0",
   "publisher": "compiscript-team",
   "engines": {
@@ -30,6 +30,10 @@
       {
         "command": "compiscript.showParseTree",
         "title": "Compiscript: Mostrar arbol sintactico"
+      },
+      {
+        "command": "compiscript.showTac",
+        "title": "Compiscript: Compilar y mostrar codigo intermedio (TAC)"
       },
       {
         "command": "compiscript.restartServer",

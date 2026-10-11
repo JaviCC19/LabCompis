@@ -143,6 +143,11 @@ npm install
    comandos, `Cmd+Shift+P` / `Ctrl+Shift+P`) para ver el árbol del
    archivo activo en un panel lateral.
 
+Para compilar el archivo activo, corre **"Compiscript: Compilar y mostrar
+codigo intermedio (TAC)"**. El TAC y la tabla de símbolos con direcciones
+se abren en un documento al lado del editor. Si el programa tiene errores,
+la extensión los indica y no genera el TAC.
+
 Si algo se traba, **"Compiscript: Reiniciar servidor de análisis"**
 reinicia el proceso del servidor sin cerrar VS Code.
 
@@ -171,4 +176,4 @@ reinicia el proceso del servidor sin cerrar VS Code.
       dinámico, arreglos, `foreach`, `try/catch`.
 - [x] `--tac` y `--symbols` en `Driver.py`.
 - [x] Tests del TAC (`tests/test_tac*.py`, `tests/test_memory_layout.py`, `tests/test_compiler.py`).
-- [ ] Mostrar el TAC desde la extensión de VS Code.
+- [x] Comando **"Compiscript: Compilar y mostrar codigo intermedio (TAC)"** en la extensión de VS Code.
