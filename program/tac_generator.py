@@ -15,6 +15,7 @@ contiene las sentencias de nivel superior.
 from antlr4.tree.Tree import ParseTreeVisitor, TerminalNode
 
 from CompiscriptParser import CompiscriptParser
+from analyzer import SemanticAnalyzer
 from ir import tac
 from ir.tac import Quad, TACProgram, TempAllocator, LabelAllocator
 from semantic import FunctionSymbol, ClassSymbol, FunctionType, VOID
@@ -28,6 +29,9 @@ class _FunctionContext:
         self.symbol = symbol
         self.code = TACProgram()
         self.temps = TempAllocator()
+        # (etiqueta de break, etiqueta de continue) de los bucles/switch abiertos;
+        # un switch no tiene continue (None), asi que 'continue' busca el bucle mas cercano.
+        self.jumps: list[tuple[str, str]] = []
 
 
 class TACGenerator(ParseTreeVisitor):
@@ -67,6 +71,11 @@ class TACGenerator(ParseTreeVisitor):
         return self._stack[-1]
 
     def _emit(self, quad: Quad) -> Quad:
+        code = self._current.code.code
+        # Un 'goto' justo despues de otro salto incondicional nunca se ejecuta
+        # (p.ej. el 'goto fin' de un if cuyo bloque termina en 'break').
+        if quad.op == tac.GOTO and code and code[-1].op in (tac.GOTO, tac.RETURN):
+            return quad
         return self._current.code.emit(quad)
 
     def _new_temp(self) -> str:
@@ -170,6 +179,112 @@ class TACGenerator(ParseTreeVisitor):
         value = self.visit(ctx.expression())
         self._release(value)
         self._emit(Quad(tac.PRINT, value))
+
+    # ------------------------------------------------------------------
+    # control de flujo
+    # ------------------------------------------------------------------
+
+    def _jump_if_false(self, expr_ctx, label: str):
+        condition = self.visit(expr_ctx)
+        self._release(condition)
+        self._emit(Quad(tac.IF_FALSE, condition, result=label))
+
+    def visitIfStatement(self, ctx: CompiscriptParser.IfStatementContext):
+        blocks = ctx.block()
+        end_label = self._label()
+        else_label = self._label() if len(blocks) > 1 else end_label
+
+        self._jump_if_false(ctx.expression(), else_label)
+        self.visit(blocks[0])
+        if len(blocks) > 1:
+            self._emit(Quad(tac.GOTO, result=end_label))
+            self._place_label(else_label)
+            self.visit(blocks[1])
+        self._place_label(end_label)
+
+    def _loop_body(self, block, break_label: str, continue_label: str):
+        self._current.jumps.append((break_label, continue_label))
+        self.visit(block)
+        self._current.jumps.pop()
+
+    def visitWhileStatement(self, ctx: CompiscriptParser.WhileStatementContext):
+        start_label, end_label = self._label(), self._label()
+        self._place_label(start_label)
+        self._jump_if_false(ctx.expression(), end_label)
+        self._loop_body(ctx.block(), end_label, start_label)
+        self._emit(Quad(tac.GOTO, result=start_label))
+        self._place_label(end_label)
+
+    def visitDoWhileStatement(self, ctx: CompiscriptParser.DoWhileStatementContext):
+        start_label, condition_label, end_label = self._label(), self._label(), self._label()
+        self._place_label(start_label)
+        self._loop_body(ctx.block(), end_label, condition_label)
+        self._place_label(condition_label)
+        condition = self.visit(ctx.expression())
+        self._release(condition)
+        self._emit(Quad(tac.IF, condition, result=start_label))
+        self._place_label(end_label)
+
+    def visitForStatement(self, ctx: CompiscriptParser.ForStatementContext):
+        if ctx.variableDeclaration() is not None:
+            self.visit(ctx.variableDeclaration())
+        elif ctx.assignment() is not None:
+            self.visit(ctx.assignment())
+
+        condition = SemanticAnalyzer._for_condition(ctx)
+        update = next((e for e in ctx.expression() if e is not condition), None)
+
+        start_label, update_label, end_label = self._label(), self._label(), self._label()
+        self._place_label(start_label)
+        if condition is not None:
+            self._jump_if_false(condition, end_label)
+        self._loop_body(ctx.block(), end_label, update_label)
+        self._place_label(update_label)
+        if update is not None:
+            self._release(self.visit(update))
+        self._emit(Quad(tac.GOTO, result=start_label))
+        self._place_label(end_label)
+
+    def visitBreakStatement(self, ctx: CompiscriptParser.BreakStatementContext):
+        self._emit(Quad(tac.GOTO, result=self._current.jumps[-1][0]))
+
+    def visitContinueStatement(self, ctx: CompiscriptParser.ContinueStatementContext):
+        target = next(cont for _, cont in reversed(self._current.jumps) if cont is not None)
+        self._emit(Quad(tac.GOTO, result=target))
+
+    def visitSwitchStatement(self, ctx: CompiscriptParser.SwitchStatementContext):
+        """Se compara el valor contra cada 'case' en orden y se salta al primero que coincida.
+
+        Los cuerpos se emiten uno tras otro, asi que sin 'break' la ejecucion
+        continua en el siguiente caso (fall-through), como en TypeScript.
+        """
+        value = self.visit(ctx.expression())
+        cases = ctx.switchCase()
+        case_labels = [self._label() for _ in cases]
+        default_label = self._label() if ctx.defaultCase() is not None else None
+        end_label = self._label()
+
+        for case, label in zip(cases, case_labels):
+            case_value = self.visit(case.expression())
+            self._release(case_value)
+            test = self._new_temp()
+            self._emit(Quad(tac.BINARY, value, case_value, test, operator="=="))
+            self._release(test)
+            self._emit(Quad(tac.IF, test, result=label))
+        self._release(value)
+        self._emit(Quad(tac.GOTO, result=default_label or end_label))
+
+        self._current.jumps.append((end_label, None))
+        for case, label in zip(cases, case_labels):
+            self._place_label(label)
+            for statement in case.statement():
+                self.visit(statement)
+        if default_label is not None:
+            self._place_label(default_label)
+            for statement in ctx.defaultCase().statement():
+                self.visit(statement)
+        self._current.jumps.pop()
+        self._place_label(end_label)
 
     # ------------------------------------------------------------------
     # funciones

@@ -210,7 +210,7 @@ def test_recursive_call():
     """
     body = function_body(source, "fact")
 
-    assert "t2 = call fact, 1" in body or "t1 = call fact, 1" in body
+    assert body[-5:] == ["t1 = n - 1", "param t1", "t1 = call fact, 1", "t1 = n * t1", "return t1"]
 
 
 def test_functions_are_emitted_before_main():
@@ -220,3 +220,162 @@ def test_functions_are_emitted_before_main():
     """)
 
     assert result.index("begin_func f, 0") < result.index("begin_func main, 0")
+
+
+# --- control de flujo ---------------------------------------------------------
+
+def test_if_without_else():
+    body = main_body("""
+        let a: integer = 1;
+        if (a > 0) { print(a); }
+    """)
+
+    assert body[1:] == ["t1 = a > 0", "ifFalse t1 goto L1", "print a", "L1:"]
+
+
+def test_if_with_else():
+    body = main_body("""
+        let a: integer = 1;
+        if (a > 0) { print(1); } else { print(2); }
+    """)
+
+    assert body[1:] == [
+        "t1 = a > 0",
+        "ifFalse t1 goto L2",
+        "print 1",
+        "goto L1",
+        "L2:",
+        "print 2",
+        "L1:",
+    ]
+
+
+def test_while_loop():
+    body = main_body("""
+        let i: integer = 0;
+        while (i < 3) { i = i + 1; }
+    """)
+
+    assert body[1:] == [
+        "L1:",
+        "t1 = i < 3",
+        "ifFalse t1 goto L2",
+        "t1 = i + 1",
+        "i = t1",
+        "goto L1",
+        "L2:",
+    ]
+
+
+def test_do_while_runs_body_before_condition():
+    body = main_body("""
+        let i: integer = 3;
+        do { i = i - 1; } while (i > 0);
+    """)
+
+    assert body[1:] == [
+        "L1:",
+        "t1 = i - 1",
+        "i = t1",
+        "L2:",
+        "t1 = i > 0",
+        "if t1 goto L1",
+        "L3:",
+    ]
+
+
+def test_for_loop_with_update_and_continue():
+    body = main_body("""
+        for (let j: integer = 0; j < 3; j = j + 1) {
+            if (j == 1) { continue; }
+            print(j);
+        }
+    """)
+
+    assert body == [
+        "j = 0",
+        "L1:",
+        "t1 = j < 3",
+        "ifFalse t1 goto L3",
+        "t1 = j == 1",
+        "ifFalse t1 goto L4",
+        "goto L2",
+        "L4:",
+        "print j",
+        "L2:",
+        "t1 = j + 1",
+        "j = t1",
+        "goto L1",
+        "L3:",
+    ]
+
+
+def test_for_without_condition_loops_until_break():
+    body = main_body("""
+        for (let j: integer = 0; ; j = j + 1) { break; }
+    """)
+
+    assert body == ["j = 0", "L1:", "goto L3", "L2:", "t1 = j + 1", "j = t1", "goto L1", "L3:"]
+
+
+def test_break_jumps_out_of_innermost_loop_only():
+    body = main_body("""
+        let i: integer = 0;
+        while (i < 2) {
+            while (true) { break; }
+            i = i + 1;
+        }
+    """)
+
+    assert "goto L4" in body  # break del while interno -> fin del interno (L4), no del externo (L2)
+    assert body.index("goto L4") < body.index("L4:")
+
+
+def test_no_unreachable_goto_after_break():
+    body = main_body("""
+        let i: integer = 0;
+        while (true) {
+            if (i == 1) { break; } else { i = 1; }
+        }
+    """)
+
+    assert body.count("goto L2") == 1
+
+
+def test_switch_compares_cases_in_order_and_falls_through():
+    body = main_body("""
+        let i: integer = 2;
+        switch (i) {
+            case 1: print("uno"); break;
+            case 2: print("dos");
+            default: print("otro");
+        }
+    """)
+
+    assert body[1:] == [
+        "t1 = i == 1",
+        "if t1 goto L1",
+        "t1 = i == 2",
+        "if t1 goto L2",
+        "goto L3",
+        "L1:",
+        'print "uno"',
+        "goto L4",
+        "L2:",
+        'print "dos"',
+        "L3:",
+        'print "otro"',
+        "L4:",
+    ]
+
+
+def test_continue_inside_switch_targets_enclosing_loop():
+    body = main_body("""
+        let i: integer = 0;
+        while (i < 3) {
+            switch (i) { case 0: continue; }
+            i = i + 1;
+        }
+    """)
+
+    assert "goto L1" in body[body.index("L3:"):]
