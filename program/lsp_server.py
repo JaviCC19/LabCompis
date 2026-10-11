@@ -9,6 +9,9 @@ ofrecerle a un editor (VS Code, via `vscode-extension/`) dos cosas:
   2. Un request custom `compiscript/parseTree` que devuelve el arbol
      sintactico del ultimo parseo exitoso como JSON, para pintarlo en un
      webview (ver `vscode-extension/src/parseTreePanel.js`).
+  3. Un request custom `compiscript/tac` que compila el documento y
+     devuelve su codigo de tres direcciones y la tabla de simbolos con
+     direcciones (o los errores, si los hay).
 
 No se agrega logica semantica aqui: este archivo es solo el adaptador
 entre `analyzer.py` y el protocolo LSP.
@@ -22,6 +25,7 @@ from pygls.server import LanguageServer
 from CompiscriptLexer import CompiscriptLexer
 from CompiscriptParser import CompiscriptParser
 from analyzer import SemanticAnalyzer
+from compiler import compile_source, describe_memory
 from tree_export import tree_to_dict
 
 server = LanguageServer("compiscript-language-server", "v1")
@@ -115,6 +119,18 @@ def parse_tree(ls: LanguageServer, params):
 
     tree, rule_names = entry
     return tree_to_dict(tree, rule_names)
+
+
+@server.command("compiscript/tac")
+def tac(ls: LanguageServer, params):
+    uri = params[0] if params else None
+    if uri is None:
+        return {"error": "no se indico el documento a compilar"}
+
+    result = compile_source(ls.workspace.get_text_document(uri).source)
+    if result.errors:
+        return {"errors": result.errors}
+    return {"tac": str(result.tac), "symbols": describe_memory(result.analyzer)}
 
 
 if __name__ == "__main__":

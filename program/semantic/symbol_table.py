@@ -9,6 +9,7 @@ excepciones que aqui se definen.
 from enum import Enum, auto
 
 from .types_system import FunctionType, ClassType, Type
+from .runtime import size_of, POINTER
 
 
 class ScopeKind(Enum):
@@ -22,6 +23,11 @@ class Symbol:
     def __init__(self, name: str, type_: Type = None):
         self.name = name
         self.type = type_
+        # Direccion en tiempo de ejecucion (ver runtime.py): area donde vive
+        # ('global', 'param', 'local' o 'field'), offset dentro de ella y tamano.
+        self.storage = None
+        self.offset = None
+        self.size = None
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.name}: {self.type})"
@@ -46,6 +52,8 @@ class FunctionSymbol(Symbol):
         self.return_type = return_type
         self.scope = None  # Scope propio de la funcion, asignado al crearlo (closures)
         self.owner_class = None  # ClassSymbol si es un metodo, None si es funcion libre
+        self.label = name  # etiqueta de entrada en el TAC ('f', 'Clase.metodo', 'externa.interna')
+        self.frame = None  # ActivationRecord con params, locales y temporales
 
     @property
     def param_types(self):
@@ -59,6 +67,45 @@ class ClassSymbol(Symbol):
         self.fields: dict[str, VariableSymbol] = {}
         self.methods: dict[str, FunctionSymbol] = {}
         self.scope = None  # Scope propio de la clase, asignado al crearla
+        self.size = 0  # bytes que ocupa una instancia (incluye los campos heredados)
+
+    def compute_layout(self):
+        """Asigna offsets a los campos: primero los heredados, luego los propios.
+
+        El offset 0 de todo objeto guarda el puntero a la vtable de su clase.
+        """
+        offset = self.superclass.size if self.superclass is not None else POINTER
+        for field in self.fields.values():
+            field.storage = "field"
+            field.offset = offset
+            field.size = size_of(field.type)
+            offset += field.size
+        self.size = offset
+
+    def vtable(self) -> list:
+        """Metodos en el orden de sus slots: un metodo que sobrescribe a otro hereda su slot."""
+        table = list(self.superclass.vtable()) if self.superclass is not None else []
+        for method in self.methods.values():
+            if method.name == "constructor":
+                continue
+            slot = next((i for i, m in enumerate(table) if m.name == method.name), None)
+            if slot is None:
+                table.append(method)
+            else:
+                table[slot] = method
+        return table
+
+    def is_subclass_of(self, other: "ClassSymbol") -> bool:
+        current = self
+        while current is not None:
+            if current is other:
+                return True
+            current = current.superclass
+        return False
+
+    def all_fields(self) -> list:
+        inherited = self.superclass.all_fields() if self.superclass is not None else []
+        return inherited + list(self.fields.values())
 
     def resolve_member(self, name: str):
         if name in self.fields:

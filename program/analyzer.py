@@ -19,6 +19,9 @@ from semantic import (
     ClassSymbol,
     DuplicateSymbolError,
     SemanticError,
+    MemoryArea,
+    ActivationRecord,
+    ThisSlot,
     INTEGER,
     FLOAT,
     STRING,
@@ -49,8 +52,14 @@ class SemanticAnalyzer(CompiscriptListener):
         self.switch_depth = 0
 
         self.types = {}  # ctx de expresion -> Type ya inferido/verificado
-        self._suffix_base = {}  # SuffixOpContext -> Type sobre el que se aplico
+        self.suffix_base = {}  # SuffixOpContext -> Type sobre el que se aplico
+        # ctx -> simbolo que declara o al que se refiere (declaraciones, identificadores,
+        # funciones, clases, foreach/catch). Lo usa el generador de TAC.
+        self.symbol_of = {}
         self._decl_symbols = {}  # ctx de declaracion -> simbolo, mientras se visita su inicializador
+
+        self.globals = MemoryArea("global", "global")  # segmento de datos de las variables globales
+        self.functions: list[FunctionSymbol] = []  # todas las funciones y metodos, en orden de declaracion
 
     # ------------------------------------------------------------------
     # utilidades
@@ -79,6 +88,16 @@ class SemanticAnalyzer(CompiscriptListener):
             if self._terminates_flow(stmt) and i + 1 < len(statements):
                 self._error(statements[i + 1], "codigo inalcanzable despues de 'return'/'break'/'continue'")
                 break
+
+    def _allocate(self, symbol):
+        """Ubica una variable en el registro de activacion de su funcion, o en el segmento global.
+
+        Los campos de clase no pasan por aqui: su offset lo fija ClassSymbol.compute_layout.
+        """
+        if self.function_stack:
+            self.function_stack[-1].frame.allocate(symbol, "local")
+        else:
+            self.globals.allocate(symbol)
 
     def _resolve_type(self, type_ctx: "CompiscriptParser.TypeContext"):
         if type_ctx is None:
@@ -123,7 +142,10 @@ class SemanticAnalyzer(CompiscriptListener):
         parent = ctx.parentCtx
         if isinstance(parent, CompiscriptParser.TryCatchStatementContext) and parent.block(1) is ctx:
             name = parent.Identifier().getText()
-            self._define(VariableSymbol(name, None, initialized=True), parent, "variable de catch")
+            symbol = VariableSymbol(name, None, initialized=True)
+            self._define(symbol, parent, "variable de catch")
+            self.symbol_of[parent] = symbol
+            self._allocate(symbol)
         elif isinstance(parent, CompiscriptParser.ForeachStatementContext):
             name = parent.Identifier().getText()
             iterable_type = self._type(parent.expression())
@@ -133,7 +155,10 @@ class SemanticAnalyzer(CompiscriptListener):
                 if not is_error(iterable_type):
                     self._error(parent, f"'foreach' espera un arreglo, se recibio '{iterable_type.name}'")
                 element_type = None
-            self._define(VariableSymbol(name, element_type, initialized=True), parent, "variable de foreach")
+            symbol = VariableSymbol(name, element_type, initialized=True)
+            self._define(symbol, parent, "variable de foreach")
+            self.symbol_of[parent] = symbol
+            self._allocate(symbol)
 
     def exitBlock(self, ctx: CompiscriptParser.BlockContext):
         self._check_dead_code(ctx.statement())
@@ -155,18 +180,23 @@ class SemanticAnalyzer(CompiscriptListener):
 
     def exitVariableDeclaration(self, ctx: CompiscriptParser.VariableDeclarationContext):
         symbol = self._decl_symbols.pop(ctx, None)
-        if symbol is None or ctx.initializer() is None:
+        if symbol is None:
             return
+        self.symbol_of[ctx] = symbol
 
-        init_type = self._type(ctx.initializer().expression())
-        if symbol.type is None:
-            symbol.type = init_type
-        elif not is_assignable(symbol.type, init_type):
-            self._error(
-                ctx,
-                f"no se puede inicializar '{symbol.name}' de tipo '{symbol.type.name}' "
-                f"con un valor de tipo '{init_type.name}'",
-            )
+        if ctx.initializer() is not None:
+            init_type = self._type(ctx.initializer().expression())
+            if symbol.type is None:
+                symbol.type = init_type
+            elif not is_assignable(symbol.type, init_type):
+                self._error(
+                    ctx,
+                    f"no se puede inicializar '{symbol.name}' de tipo '{symbol.type.name}' "
+                    f"con un valor de tipo '{init_type.name}'",
+                )
+
+        if self.table.current_scope.kind != ScopeKind.CLASS:
+            self._allocate(symbol)
 
     def enterConstantDeclaration(self, ctx: CompiscriptParser.ConstantDeclarationContext):
         if ctx in self._decl_symbols:
@@ -182,6 +212,7 @@ class SemanticAnalyzer(CompiscriptListener):
         symbol = self._decl_symbols.pop(ctx, None)
         if symbol is None:
             return
+        self.symbol_of[ctx] = symbol
 
         init_type = self._type(ctx.expression())
         if symbol.type is None:
@@ -192,6 +223,9 @@ class SemanticAnalyzer(CompiscriptListener):
                 f"no se puede inicializar la constante '{symbol.name}' de tipo '{symbol.type.name}' "
                 f"con un valor de tipo '{init_type.name}'",
             )
+
+        if self.table.current_scope.kind != ScopeKind.CLASS:
+            self._allocate(symbol)
 
     # ------------------------------------------------------------------
     # asignacion como sentencia (Identifier '=' expr ';'  /  expr '.' Id '=' expr ';')
@@ -204,6 +238,7 @@ class SemanticAnalyzer(CompiscriptListener):
         if len(expressions) == 1:
             value_type = self._type(expressions[0])
             symbol = self.table.resolve(member_name)
+            self.symbol_of[ctx] = symbol
             if symbol is None:
                 self._error(ctx, f"variable '{member_name}' no declarada")
             elif getattr(symbol, "is_const", False):
@@ -242,6 +277,7 @@ class SemanticAnalyzer(CompiscriptListener):
     def exitIdentifierExpr(self, ctx: CompiscriptParser.IdentifierExprContext):
         text = ctx.Identifier().getText()
         symbol = self.table.resolve(text)
+        self.symbol_of[ctx] = symbol
         if symbol is None:
             self._error(ctx, f"variable '{text}' no declarada")
             self._set_type(ctx, ERROR)
@@ -257,6 +293,7 @@ class SemanticAnalyzer(CompiscriptListener):
             return
 
         self._set_type(ctx, symbol.type)
+        self.symbol_of[ctx] = symbol
 
         args = ctx.arguments().expression() if ctx.arguments() else []
         arg_types = [self._type(a) for a in args]
@@ -530,7 +567,7 @@ class SemanticAnalyzer(CompiscriptListener):
     def exitLeftHandSide(self, ctx: CompiscriptParser.LeftHandSideContext):
         current = self._type(ctx.primaryAtom())
         for suffix in ctx.suffixOp():
-            self._suffix_base[suffix] = current
+            self.suffix_base[suffix] = current
             current = self._apply_suffix(suffix, current)
         self._set_type(ctx, current)
 
@@ -545,7 +582,7 @@ class SemanticAnalyzer(CompiscriptListener):
 
         last = suffixes[-1]
         if isinstance(last, CompiscriptParser.PropertyAccessExprContext):
-            base_type = self._suffix_base.get(last)
+            base_type = self.suffix_base.get(last)
             if isinstance(base_type, ClassType) and base_type.class_symbol is not None:
                 return base_type.class_symbol.resolve_member(last.Identifier().getText())
         return None
@@ -686,6 +723,16 @@ class SemanticAnalyzer(CompiscriptListener):
                 symbol.owner_class = self.class_stack[-1]
             self._define(symbol, ctx, "funcion")
 
+        if symbol.owner_class is not None:
+            symbol.label = f"{symbol.owner_class.name}.{symbol.name}"
+        elif self.function_stack:
+            symbol.label = f"{self.function_stack[-1].label}.{symbol.name}"
+        symbol.frame = ActivationRecord(symbol.label)
+        self.symbol_of[ctx] = symbol
+        self.functions.append(symbol)
+        if symbol.owner_class is not None:
+            symbol.frame.allocate(ThisSlot(symbol.owner_class.type), "param")
+
         scope = self.table.enter_scope(ScopeKind.FUNCTION, owner=symbol)
         symbol.scope = scope
         self.function_stack.append(symbol)
@@ -693,6 +740,7 @@ class SemanticAnalyzer(CompiscriptListener):
 
         for param in params:
             self._define(param, ctx, "parametro")
+            symbol.frame.allocate(param, "param")
 
     def exitFunctionDeclaration(self, ctx: CompiscriptParser.FunctionDeclarationContext):
         self.table.exit_scope()
@@ -741,6 +789,7 @@ class SemanticAnalyzer(CompiscriptListener):
 
         symbol = ClassSymbol(name, superclass=superclass)
         self._define(symbol, ctx, "clase")
+        self.symbol_of[ctx] = symbol
 
         scope = self.table.enter_scope(ScopeKind.CLASS, owner=symbol)
         symbol.scope = scope
@@ -785,7 +834,7 @@ class SemanticAnalyzer(CompiscriptListener):
         self._decl_symbols[func_ctx] = symbol
 
     def exitClassDeclaration(self, ctx: CompiscriptParser.ClassDeclarationContext):
-        self.class_stack.pop()
+        self.class_stack.pop().compute_layout()
         self.table.exit_scope()
 
     # ------------------------------------------------------------------

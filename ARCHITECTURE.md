@@ -91,6 +91,50 @@ tipos ya calculados de cada expresión se guardan en `self.types` (un
 una asignación) puedan consultar el tipo de sus subexpresiones sin
 recalcularlo.
 
+Además de validar, el analizador deja anotado lo que necesita la
+generación de código: `symbol_of` (`dict[ctx -> símbolo]` de cada
+declaración, identificador, función, clase y variable de
+`foreach`/`catch`), `suffix_base` (el tipo sobre el que se aplica cada
+`.campo`/`[i]`/`(...)`) y la lista `functions`. También asigna la
+**dirección** de cada variable (`_allocate`): segmento global, registro de
+activación de su función o, para los campos, el layout de su clase.
+
+### `program/semantic/runtime.py` — memoria en tiempo de ejecución
+
+`size_of(tipo)`, `MemoryArea` (área contigua con offsets crecientes:
+segmento global) y `ActivationRecord` (registro de activación de una
+función: `this`, parámetros, locales y temporales). `ClassSymbol` calcula
+el layout de sus instancias (`compute_layout`: puntero a vtable, campos
+heredados y propios) y su `vtable()`. Al igual que el resto de
+`semantic/`, no depende de ANTLR.
+
+### `program/ir/tac.py` — representación intermedia
+
+Define el TAC como cuádruplos (`Quad`), el contenedor `TACProgram`, el
+asignador de temporales con reciclaje (`TempAllocator`) y el de etiquetas
+(`LabelAllocator`). No conoce ANTLR ni la tabla de símbolos. El formato
+está documentado en [`TAC.md`](TAC.md).
+
+### `program/tac_generator.py` — generación de TAC
+
+`TACGenerator` es un Visitor que recorre el árbol **después** del
+análisis semántico. Cada `visitX` de una sentencia emite cuádruplos, y
+cada `visitX` de una expresión los emite y devuelve el operando donde
+quedó su valor (variable, temporal o literal). No vuelve a resolver
+nombres: usa `symbol_of`, `suffix_base` y las direcciones que dejó el
+analizador. Cada función se genera en su propio búfer
+(`_FunctionContext`), con su propio asignador de temporales y su propia
+pila de etiquetas de `break`/`continue`. Al cerrar la función, el tamaño
+de su registro de activación se completa con los temporales usados.
+
+### `program/compiler.py` — pipeline
+
+`compile_source(fuente)` corre lexer → parser → `SemanticAnalyzer` →
+`TACGenerator` y devuelve un `CompileResult` (árbol, errores, analizador,
+TAC). El TAC solo se genera si no hubo errores. `describe_memory` arma el
+reporte de la tabla de símbolos con direcciones. Tanto `Driver.py` como
+los tests usan este módulo.
+
 ### `program/tree_export.py` — representación visual del árbol
 
 Dos funciones puras, sin estado: `tree_to_dict` (arbol → `dict` JSON,
@@ -101,10 +145,11 @@ las dos conoce reglas semánticas — sólo recorren la forma del
 
 ### `program/Driver.py` — CLI
 
-Punto de entrada por línea de comandos: parsea un `.cps`, corre el
-analizador semántico y imprime errores de sintaxis o de semántica.
-Acepta `--tree <archivo.json|archivo.dot>` para además volcar el árbol
-sintáctico (ver más abajo).
+Punto de entrada por línea de comandos (sobre `compiler.py`): compila un
+`.cps` e imprime los errores de sintaxis o de semántica. Opciones:
+`--tree <archivo.json|archivo.dot>` vuelca el árbol sintáctico, `--tac
+[archivo]` emite el código de tres direcciones y `--symbols` muestra la
+tabla de símbolos con direcciones y registros de activación.
 
 ### `program/lsp_server.py` — servidor para el editor
 
